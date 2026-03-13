@@ -129,7 +129,7 @@ docker compose up -d --build
 | Dashboard | Docker (`docker compose`) | 24/7 | FastAPI dashboard on port 8080 |
 | Sentiment | Docker (`docker compose`) | Every 30 min | Scans headlines, classifies via Ollama |
 | Caffeinate | launchd (`com.buzzalgo.caffeinate`) | 24/7 | Prevents Mac sleep |
-| Improve | launchd (`com.buzzalgo.improve`) | 5pm ET Mon-Fri | Claude Code analyzes + improves strategy |
+| Improve | launchd (`com.buzzalgo.improve`) | 2am, 8am, 5pm ET Mon-Fri | Claude Code analyzes + improves strategy |
 | Sweep | launchd (`com.buzzalgo.sweep`) | 2am Sat+Sun | Parameter grid search |
 
 Plist templates are in `launchd/` — `setup.sh` installs them automatically.
