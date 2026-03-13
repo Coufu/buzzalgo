@@ -4,10 +4,10 @@
     "description": "RSI(14) oversold/overbought signals with EMA(20) direction filter, volume confirmation, and ADX regime detection",
     "parameters": {
         "rsi_period": 14,
-        "rsi_oversold": 40,
-        "rsi_overbought": 60,
+        "rsi_oversold": 30,
+        "rsi_overbought": 70,
         "ema_period": 20,
-        "volume_multiplier": 0.5,
+        "volume_multiplier": 1.0,
         "volume_lookback": 20,
         "atr_period": 14,
         "adx_period": 14,
@@ -15,7 +15,7 @@
         "adx_ranging_threshold": 20,
         "take_profit_atr_mult": 3.0,
         "trailing_activation_mult": 1.5,
-        "sentiment_enabled": true,
+        "sentiment_enabled": false,
         "sentiment_weight": 0.3,
         "sentiment_veto_threshold": 0.5,
         "sentiment_lookback_hours": 4
