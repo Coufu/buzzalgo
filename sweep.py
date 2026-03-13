@@ -33,13 +33,14 @@ STRATEGY_JSON = Path(__file__).parent / "strategy.json"
 SWEEP_RESULTS = Path(__file__).parent / "sweep_results.json"
 
 # Parameter grid — each key maps to a list of values to try
+# Keep grid small — each combo takes ~12 min with full universe.
+# RSI oversold/overbought are paired (they move together).
 PARAM_GRID = {
-    "rsi_period": [10, 14, 20],
-    "rsi_oversold": [30, 35, 40],
-    "rsi_overbought": [60, 65, 70],
-    "ema_period": [10, 20, 50],
-    "volume_multiplier": [0.3, 0.5, 1.0],
+    "rsi_oversold": [25, 30, 35],
+    "rsi_overbought": [65, 70, 75],
+    "volume_multiplier": [0.5, 1.0, 1.5],
 }
+# 27 combos x ~12 min = ~5.5 hours. Runs overnight on weekends.
 
 
 def run_sweep(days: int = 60, top_n: int = 5):
