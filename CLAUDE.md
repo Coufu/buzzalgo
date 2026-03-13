@@ -118,6 +118,10 @@ python sentiment.py --once
 # Run parameter sweep
 python sweep.py --days 60 --top 10
 
+# Replay a specific day
+python replay.py --date 2026-03-12
+python replay.py --compare proposed_params.json
+
 # Start all Docker services
 docker compose up -d --build
 ```

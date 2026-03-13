@@ -35,6 +35,46 @@ logger = logging.getLogger(__name__)
 
 STRATEGY_JSON = Path(__file__).parent / "strategy.json"
 
+SECTOR_MAP = {
+    # ETFs
+    "SPY": "ETF", "QQQ": "ETF", "IWM": "ETF", "DIA": "ETF", "XLF": "ETF",
+    "XLE": "ETF", "XLK": "ETF", "XLV": "ETF", "XLI": "ETF", "XLP": "ETF",
+    "GLD": "ETF", "SLV": "ETF", "EEM": "ETF", "TLT": "ETF", "HYG": "ETF",
+    "ARKK": "ETF", "SOXL": "ETF", "TQQQ": "ETF",
+    # Technology
+    "AAPL": "Tech", "MSFT": "Tech", "NVDA": "Tech", "GOOGL": "Tech", "META": "Tech",
+    "AMD": "Tech", "AVGO": "Tech", "INTC": "Tech", "CSCO": "Tech", "ORCL": "Tech",
+    "ADBE": "Tech", "CRM": "Tech", "SMCI": "Tech", "ARM": "Tech",
+    # Consumer/Internet
+    "AMZN": "Consumer", "TSLA": "Consumer", "NFLX": "Consumer", "DIS": "Consumer",
+    "HD": "Consumer", "COST": "Consumer", "WMT": "Consumer", "PG": "Consumer",
+    "KO": "Consumer", "PEP": "Consumer", "ABNB": "Consumer", "UBER": "Consumer",
+    "RBLX": "Consumer", "SHOP": "Consumer",
+    # Financial
+    "JPM": "Financial", "V": "Financial", "MA": "Financial", "BAC": "Financial",
+    "PYPL": "Financial", "SQ": "Financial", "SOFI": "Financial", "HOOD": "Financial",
+    "COIN": "Financial", "NU": "Financial",
+    # Healthcare
+    "JNJ": "Healthcare", "UNH": "Healthcare", "LLY": "Healthcare", "ABBV": "Healthcare",
+    "MRK": "Healthcare",
+    # Energy
+    "XOM": "Energy", "ENPH": "Energy", "FSLR": "Energy",
+    # Travel/Transport
+    "CCL": "Travel", "AAL": "Travel", "DAL": "Travel", "UAL": "Travel", "F": "Travel", "GM": "Travel",
+    # Crypto-adjacent
+    "MARA": "Crypto", "RIOT": "Crypto", "MSTR": "Crypto",
+    # China/LatAm
+    "BABA": "International", "JD": "International", "PDD": "International",
+    "BILI": "International", "GRAB": "International", "SE": "International", "MELI": "International",
+    # Cloud/Cyber
+    "CRWD": "Cloud", "PANW": "Cloud", "ZS": "Cloud", "NET": "Cloud",
+    "DDOG": "Cloud", "MDB": "Cloud", "SNOW": "Cloud", "PATH": "Cloud", "U": "Cloud",
+    # Other
+    "RIVN": "EV", "LCID": "EV", "NIO": "EV",
+    "DKNG": "Consumer", "SNAP": "Tech", "PLTR": "Tech", "ROKU": "Tech", "RKLB": "Tech",
+    "T": "Telecom",
+}
+
 
 @dataclass
 class Signal:
@@ -68,10 +108,15 @@ class Strategy:
         self.adx_period = params.get("adx_period", 14)
         self.adx_trending = params.get("adx_trending_threshold", 25)
         self.adx_ranging = params.get("adx_ranging_threshold", 20)
+        self.time_exit_minutes = params.get("time_exit_minutes", 120)
+        self.time_exit_max_profit_atr = params.get("time_exit_max_profit_atr", 0.5)
         self.sentiment_enabled = params.get("sentiment_enabled", False)
         self.sentiment_weight = params.get("sentiment_weight", 0.3)
         self.sentiment_veto_threshold = params.get("sentiment_veto_threshold", 0.5)
         self.sentiment_lookback_hours = params.get("sentiment_lookback_hours", 4)
+        self.multi_timeframe_enabled = params.get("multi_timeframe_enabled", False)
+        self.daily_trend_period = params.get("daily_trend_period", 5)
+        self.max_positions_per_sector = params.get("max_positions_per_sector", 2)
         self.universe = params.get("universe", ["SPY", "QQQ", "IWM"])
         logger.info("Strategy v%s initialized: RSI(%d) EMA(%d) ADX(%d)",
                      self.VERSION, self.rsi_period, self.ema_period, self.adx_period)
@@ -142,7 +187,25 @@ class Strategy:
             return "afternoon"
         return "close_30"
 
-    def generate_signals(self, bars: dict[str, pd.DataFrame]) -> list[Signal]:
+    def _daily_trend(self, df: pd.DataFrame) -> str:
+        """Compute daily trend from 5-min bars by resampling to daily."""
+        try:
+            daily = df["close"].resample("1D").last().dropna()
+            if len(daily) < self.daily_trend_period:
+                return "neutral"
+            ema = daily.ewm(span=self.daily_trend_period, adjust=False).mean()
+            if len(ema) < 2:
+                return "neutral"
+            slope = (ema.iloc[-1] - ema.iloc[-2]) / ema.iloc[-2]
+            if slope > 0.001:
+                return "up"
+            elif slope < -0.001:
+                return "down"
+        except Exception:
+            pass
+        return "neutral"
+
+    def generate_signals(self, bars: dict[str, pd.DataFrame], open_symbols: list[str] | None = None) -> list[Signal]:
         """Generate trading signals for all symbols.
 
         Args:
@@ -161,6 +224,19 @@ class Strategy:
                     sentiment_map = _db.get_aggregate_sentiment(conn, self.sentiment_lookback_hours)
             except Exception:
                 pass  # No sentiment data is fine — defaults to neutral
+
+        # Compute daily trends for multi-timeframe filter
+        daily_trends: dict[str, str] = {}
+        if self.multi_timeframe_enabled:
+            for symbol, df in bars.items():
+                daily_trends[symbol] = self._daily_trend(df)
+
+        # Sector counts for correlation filter
+        sector_counts: dict[str, int] = {}
+        if open_symbols:
+            for sym in open_symbols:
+                sector = SECTOR_MAP.get(sym, "Other")
+                sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
         signals = []
         for symbol, df in bars.items():
@@ -192,6 +268,17 @@ class Strategy:
             if volume_ratio < self.volume_multiplier:
                 continue
 
+            # Multi-timeframe filter: skip signals against daily trend
+            daily_trend = daily_trends.get(symbol, "neutral")
+            if self.multi_timeframe_enabled and daily_trend != "neutral":
+                # We'll pass daily_trend to _evaluate_entry for filtering
+                pass
+
+            # Sector correlation filter
+            sector = SECTOR_MAP.get(symbol, "Other")
+            if sector != "ETF" and sector_counts.get(sector, 0) >= self.max_positions_per_sector:
+                continue
+
             sentiment_score = sentiment_map.get(symbol, 0.0)
 
             signal = self._evaluate_entry(
@@ -199,6 +286,7 @@ class Strategy:
                 regime=regime, adx=adx, ema_slope=ema_slope,
                 time_bucket=time_bucket, entry_hour=entry_hour,
                 sentiment_score=sentiment_score,
+                daily_trend=daily_trend,
             )
             if signal is not None:
                 signals.append(signal)
@@ -211,6 +299,7 @@ class Strategy:
         *, regime: str = "", adx: float = 0, ema_slope: float = 0,
         time_bucket: str = "", entry_hour: int | None = None,
         sentiment_score: float = 0.0,
+        daily_trend: str = "neutral",
     ) -> Signal | None:
         """Evaluate whether current conditions warrant an entry signal."""
 
@@ -221,12 +310,16 @@ class Strategy:
             "time_bucket": time_bucket,
             "entry_hour": entry_hour,
             "sentiment_score": round(sentiment_score, 3),
+            "daily_trend": daily_trend,
         }
 
         # Long signal: RSI crosses above oversold + price above EMA (momentum confirmation)
         if prev_rsi <= self.rsi_oversold and rsi > self.rsi_oversold and price > ema:
             # Skip longs in strong downtrend
             if regime == "trending_down" and adx > self.adx_trending:
+                return None
+            # Multi-timeframe: skip longs if daily trend is down
+            if self.multi_timeframe_enabled and daily_trend == "down":
                 return None
             strength = min(1.0, (self.rsi_oversold - prev_rsi + 10) / 20 * volume_ratio / max(self.volume_multiplier, 0.01))
             # Sentiment boost/dampen signal strength
@@ -255,6 +348,9 @@ class Strategy:
         if prev_rsi >= self.rsi_overbought and rsi < self.rsi_overbought and price < ema:
             # Skip shorts in strong uptrend
             if regime == "trending_up" and adx > self.adx_trending:
+                return None
+            # Multi-timeframe: skip shorts if daily trend is up
+            if self.multi_timeframe_enabled and daily_trend == "up":
                 return None
             strength = min(1.0, (prev_rsi - self.rsi_overbought + 10) / 20 * volume_ratio / max(self.volume_multiplier, 0.01))
             # Sentiment boost/dampen (invert: bearish sentiment boosts short strength)
@@ -295,23 +391,31 @@ class Strategy:
         Returns:
             (should_exit, reason) tuple.
         """
-        # Trailing stop logic: after price moves 1.5x ATR in our favor,
-        # tighten stop to 1x ATR from current price
         entry_price = trade["entry_price"]
         side = trade["side"]
         atr_at_entry = trade.get("atr_at_entry", current_atr)
 
         if side == "long":
             profit_atr = (current_price - entry_price) / atr_at_entry
-            if profit_atr >= 1.5:
-                trailing_stop = current_price - current_atr
-                if current_price <= trailing_stop:
-                    return True, "trailing_stop"
-        elif side == "short":
+        else:
             profit_atr = (entry_price - current_price) / atr_at_entry
-            if profit_atr >= 1.5:
-                trailing_stop = current_price + current_atr
-                if current_price >= trailing_stop:
-                    return True, "trailing_stop"
+
+        # Time-based exit: close flat trades after N minutes (live only)
+        entry_time_str = trade.get("opened_at") or trade.get("entry_time")
+        if entry_time_str and self.time_exit_minutes > 0:
+            try:
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+                entry_time = datetime.fromisoformat(str(entry_time_str))
+                elapsed = (datetime.now(ZoneInfo("America/New_York")) - entry_time).total_seconds() / 60
+                if elapsed >= self.time_exit_minutes and abs(profit_atr) < self.time_exit_max_profit_atr:
+                    return True, "time_exit_flat"
+            except (ValueError, TypeError):
+                pass
+
+        # Note: trailing stop logic is handled by the backtest simulate() and
+        # trader via stop_price/take_profit_price from risk.py. The should_exit()
+        # method cannot implement a true trailing stop because it has no memory
+        # of the peak price between calls.
 
         return False, ""

@@ -379,6 +379,22 @@ def run_claude_code_improvement():
         logger.info("No report generated - skipping improvement cycle")
         return
 
+    # Load sweep results if available
+    sweep_section = ""
+    sweep_path = PROJECT_ROOT / "sweep_results.json"
+    if sweep_path.exists():
+        try:
+            with open(sweep_path) as f:
+                sweep_data = json.load(f)
+            top_results = sweep_data.get("results", [])[:10]
+            if top_results:
+                sweep_section = "\n## Parameter Sweep Results (Top 10)\n"
+                sweep_section += "Do NOT blindly adopt these — they may be overfit. Use as a guide.\n```json\n"
+                sweep_section += json.dumps(top_results, indent=2)
+                sweep_section += "\n```\n"
+        except (json.JSONDecodeError, KeyError):
+            pass
+
     kill_active, kill_reason = check_kill_criteria()
 
     kill_directive = ""
@@ -404,7 +420,8 @@ Read the following files to understand the current state:
 3. strategy.py - the current strategy implementation
 4. improvement_log.md - history of past improvements (AVOID repeating failed hypotheses)
 5. strategy.json - current parameters and kill criteria
-{kill_directive}
+6. sweep_results.json - parameter sweep results (if available)
+{kill_directive}{sweep_section}
 ## Analysis Framework
 
 Before making changes, perform this structured analysis:
