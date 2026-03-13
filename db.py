@@ -201,15 +201,43 @@ def insert_sentiment(conn: sqlite3.Connection, record: dict):
 
 
 def get_aggregate_sentiment(conn: sqlite3.Connection, hours: int = 4) -> dict[str, float]:
-    """Return average sentiment score per symbol over the last N hours."""
+    """Return time-weighted average sentiment score per symbol.
+
+    Recent headlines are weighted more heavily using exponential decay.
+    A headline from right now has weight 1.0, one from `hours` ago has weight ~0.13.
+    """
     rows = conn.execute(
-        """SELECT symbol, AVG(score) as avg_score
+        """SELECT symbol, score, scanned_at
            FROM sentiment_scores
-           WHERE scanned_at >= datetime('now', ?)
-           GROUP BY symbol""",
+           WHERE scanned_at >= datetime('now', ?)""",
         (f"-{hours} hours",),
     ).fetchall()
-    return {row["symbol"]: row["avg_score"] for row in rows}
+
+    if not rows:
+        return {}
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    half_life_hours = hours / 2  # half-life at midpoint of window
+
+    symbol_scores: dict[str, list[tuple[float, float]]] = {}
+    for row in rows:
+        symbol = row["symbol"]
+        score = row["score"]
+        try:
+            scanned = datetime.fromisoformat(row["scanned_at"])
+            age_hours = (now - scanned).total_seconds() / 3600
+            weight = 2 ** (-age_hours / half_life_hours)
+        except (ValueError, TypeError):
+            weight = 0.5
+        symbol_scores.setdefault(symbol, []).append((score, weight))
+
+    result = {}
+    for symbol, pairs in symbol_scores.items():
+        total_weight = sum(w for _, w in pairs)
+        if total_weight > 0:
+            result[symbol] = sum(s * w for s, w in pairs) / total_weight
+    return result
 
 
 def log_daily_performance(conn: sqlite3.Connection, perf: dict):
