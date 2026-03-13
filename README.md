@@ -50,18 +50,26 @@ ALPACA_BASE_URL=https://paper-api.alpaca.markets
 
 ## Usage
 
-### Docker (recommended)
+### Run (Docker + native improvement loop)
 
 ```bash
-docker compose up -d
+# Start trader and dashboard in Docker
+docker compose up -d --build
+
+# Install the nightly improvement loop (runs at 5pm ET weekdays via launchd)
+cp com.buzzalgo.improve.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.buzzalgo.improve.plist
 ```
 
-This starts all three services (trader, dashboard, improvement loop) with auto-restart. Dashboard at http://localhost:8080.
+Dashboard at http://localhost:8080.
 
 ```bash
 docker compose logs -f trader    # watch trade activity
 docker compose down              # stop everything
+launchctl unload ~/Library/LaunchAgents/com.buzzalgo.improve.plist  # stop improvement loop
 ```
+
+> **Note:** The improvement loop runs natively (not in Docker) because it needs access to the Claude Code CLI.
 
 ### Manual (without Docker)
 

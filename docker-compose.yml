@@ -21,15 +21,3 @@ services:
     volumes:
       - ./data:/app/data
       - ./strategy.json:/app/strategy.json
-
-  improve:
-    build: .
-    command: python improve.py --cron
-    restart: always
-    env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./strategy.json:/app/strategy.json
-      - ./strategy.py:/app/strategy.py
-      - ./improvement_log.md:/app/improvement_log.md
-      - ./.git:/app/.git
