@@ -1,118 +1,106 @@
 # AlgoTrader Pro
 
-Self-improving algorithmic paper trader. Combines a real-time trade execution engine with a nightly Claude Code improvement loop that analyzes performance and evolves the trading strategy autonomously.
+Self-improving algorithmic paper trader. Trades automatically during market hours and uses Claude Code every evening to analyze performance and evolve the strategy.
 
-## Architecture
+## Quick Start
 
-Two runtime layers communicating via SQLite and git:
+### 1. Get Alpaca API keys
 
-- **Trader** (`trader.py`) — Runs 24/7, executes trades via Alpaca paper trading on 5-min bars
-- **Intelligence Loop** (`improve.py`) — Runs nightly at 5pm ET, triggers Claude Code to analyze trades, modify `strategy.py`, validate via backtest, and deploy if improved
+Sign up at [alpaca.markets](https://alpaca.markets/) and get your **paper trading** API keys.
 
-## Setup
-
-### Prerequisites
-
-- macOS (Apple Silicon)
-- [Homebrew](https://brew.sh/)
-- [Alpaca](https://alpaca.markets/) paper trading account
-- [Claude Code](https://claude.com/claude-code) CLI (for the improvement loop)
-
-### Install
+### 2. Clone and configure
 
 ```bash
-# Install Python 3.13 if you don't have it
-brew install python@3.13
-
-# Clone and set up
 git clone https://github.com/Coufu/buzzalgo.git
 cd buzzalgo
+cp .env.example .env
+```
+
+Edit `.env` with your keys:
+
+```
+ALPACA_API_KEY=your_key
+ALPACA_SECRET_KEY=your_secret
+ALPACA_BASE_URL=https://paper-api.alpaca.markets
+```
+
+### 3. Install Python (for the improvement loop)
+
+```bash
+brew install python@3.13
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> **Note:** macOS ships with an older Python (3.8/3.9) that won't work. You need Python 3.12+ installed via Homebrew. Verify with `python3.13 --version`.
-
-### Configure
+### 4. Start everything
 
 ```bash
-cp .env.example .env
-```
-
-Edit `.env` with your Alpaca API keys:
-
-```
-ALPACA_API_KEY=your_api_key_here
-ALPACA_SECRET_KEY=your_secret_key_here
-ALPACA_BASE_URL=https://paper-api.alpaca.markets
-```
-
-## Usage
-
-### Run (Docker + native improvement loop)
-
-```bash
-# Start trader and dashboard in Docker
 docker compose up -d --build
-
-# Install the nightly improvement loop (runs at 5pm ET weekdays via launchd)
 cp com.buzzalgo.improve.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.buzzalgo.improve.plist
 ```
 
-Dashboard at http://localhost:8080.
+That's it. The trader and dashboard run in Docker. The improvement loop runs natively at 5pm ET every weekday (it needs Claude Code CLI access).
+
+### 5. Check on it
+
+- **Dashboard:** http://localhost:8080
+- **Trader logs:** `docker compose logs -f trader`
+- **Improvement logs:** `tail -f improve.log`
+
+## Stopping
 
 ```bash
-docker compose logs -f trader    # watch trade activity
-docker compose down              # stop everything
-launchctl unload ~/Library/LaunchAgents/com.buzzalgo.improve.plist  # stop improvement loop
+docker compose down
+launchctl unload ~/Library/LaunchAgents/com.buzzalgo.improve.plist
 ```
 
-> **Note:** The improvement loop runs natively (not in Docker) because it needs access to the Claude Code CLI.
+## How It Works
 
-### Manual (without Docker)
+**During market hours (9:30am-4pm ET):**
+- Watches 5-minute price bars for SPY, QQQ, IWM and 20 large-cap stocks
+- Enters trades when RSI + EMA + volume signals align
+- Manages positions with stop-losses, take-profits, and trailing stops
+- Halts trading if daily losses exceed 3%
+
+**Every evening at 5pm ET:**
+- Claude Code analyzes the day's trades
+- Identifies what worked and what didn't
+- Modifies the strategy and runs a backtest
+- Deploys the change only if it improves the Sharpe ratio
+- Commits every change to git with an explanation
+
+**Safety rules (locked, Claude Code cannot change):**
+- 2% of portfolio per trade
+- 1.5x ATR stop-loss
+- Max 5 positions at a time
+- -3% daily loss circuit breaker
+- Paper trading only (no real money)
+
+## Other Commands
 
 ```bash
 source .venv/bin/activate
-caffeinate -i python trader.py   # terminal 1: trader
-python dashboard.py              # terminal 2: dashboard on :8080
-python improve.py --cron         # terminal 3: nightly improvement loop
-```
 
-### Other commands
-
-```bash
-python backtest.py              # 60-day walk-forward validation
+python backtest.py              # run a 60-day backtest
 python backtest.py --days 90    # custom window
-python improve.py --report-only # generate performance report only
+python improve.py               # trigger one improvement cycle manually
+python improve.py --report-only # just generate the performance report
 python -m pytest tests/ -v      # run tests
 ```
-
-## Strategy
-
-Momentum + Mean Reversion hybrid on 5-min bars:
-
-- **Entry**: RSI(14) crosses oversold/overbought thresholds with EMA(20) direction confirmation and 1.5x volume filter
-- **Universe**: SPY, QQQ, IWM + top 20 liquid large-caps
-- **Risk** (locked): 2% position sizing, 1.5x ATR stop-loss, 3x ATR take-profit, max 5 positions, -3% daily circuit breaker
-
-Claude Code modifies signal logic nightly. Risk management in `risk.py` is locked and never modified.
 
 ## File Structure
 
 ```
-├── CLAUDE.md             # Claude Code operating context
-├── trader.py             # Main execution loop (24/7)
-├── strategy.py           # Active strategy (modified nightly by Claude Code)
-├── strategy.json         # Hot-reloadable parameters
-├── risk.py               # Position sizing, stop-loss, circuit breaker (LOCKED)
-├── backtest.py           # Walk-forward validation harness
-├── improve.py            # Nightly improvement loop orchestrator
-├── dashboard.py          # FastAPI dashboard (port 8080)
-├── db.py                 # SQLite persistence layer
-├── trades.db             # Trade log (created at runtime)
-├── improvement_log.md    # Hypothesis history
-├── tests/                # Test suite
-└── .env                  # Alpaca API keys (not committed)
+CLAUDE.md             # Claude Code's operating instructions
+trader.py             # Trading engine (runs in Docker)
+strategy.py           # Trading strategy (Claude Code evolves this)
+strategy.json         # Strategy parameters (hot-reloaded)
+risk.py               # Risk management (LOCKED - never modified)
+backtest.py           # Backtesting engine
+improve.py            # Nightly improvement loop
+dashboard.py          # Web dashboard
+db.py                 # Database layer
+.env                  # Your Alpaca API keys (not committed)
 ```
