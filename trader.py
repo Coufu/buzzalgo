@@ -33,6 +33,7 @@ from alpaca.data.live import StockDataStream
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -116,6 +117,7 @@ class Trader:
             timeframe=TimeFrame.Minute,
             start=start,
             end=end,
+            feed=DataFeed.IEX,
         )
         barset = self.data_client.get_stock_bars(request)
 

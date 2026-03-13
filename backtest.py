@@ -29,6 +29,7 @@ load_dotenv()
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
 
 import risk
 from strategy import Strategy
@@ -108,6 +109,7 @@ def fetch_historical_data(symbols: list[str], days: int) -> dict[str, pd.DataFra
         timeframe=TimeFrame.Minute,
         start=start,
         end=end,
+        feed=DataFeed.IEX,
     )
     barset = client.get_stock_bars(request)
 
