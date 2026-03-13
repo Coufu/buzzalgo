@@ -11,7 +11,9 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent / "trades.db"
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
+DB_PATH = DATA_DIR / "trades.db"
 
 
 def get_connection(db_path: str | Path = DB_PATH) -> sqlite3.Connection:

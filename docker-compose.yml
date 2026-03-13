@@ -5,7 +5,7 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - ./trades.db:/app/trades.db
+      - ./data:/app/data
       - ./strategy.json:/app/strategy.json
       - ./strategy.py:/app/strategy.py
     depends_on:
@@ -19,7 +19,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./trades.db:/app/trades.db
+      - ./data:/app/data
       - ./strategy.json:/app/strategy.json
 
   improve:
@@ -28,7 +28,7 @@ services:
     restart: always
     env_file: .env
     volumes:
-      - ./trades.db:/app/trades.db
+      - ./data:/app/data
       - ./strategy.json:/app/strategy.json
       - ./strategy.py:/app/strategy.py
       - ./improvement_log.md:/app/improvement_log.md
