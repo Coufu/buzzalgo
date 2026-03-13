@@ -467,7 +467,10 @@ class Trader:
 
                 # Fetch bars and compute signals
                 bars = self._fetch_historical_bars(self.strategy.universe)
-                signals = self.strategy.generate_signals(bars)
+                with db.get_db() as conn:
+                    open_trades = db.get_open_trades(conn)
+                open_syms = [t["symbol"] for t in open_trades]
+                signals = self.strategy.generate_signals(bars, open_symbols=open_syms)
 
                 if signals:
                     logger.info("Generated %d signals", len(signals))
