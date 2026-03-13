@@ -110,16 +110,18 @@ def init_db(db_path: str | Path = DB_PATH):
     logger.info("Database initialized at %s", db_path)
 
 
+_TRADE_COLUMNS = frozenset([
+    "timestamp", "symbol", "side", "qty", "entry_price", "exit_price",
+    "stop_price", "take_profit_price", "pnl", "pnl_pct",
+    "strategy_version", "signal_type", "signal_context", "status",
+    "opened_at", "closed_at", "atr_at_entry", "rsi_at_entry",
+    "ema_at_entry", "volume_ratio", "market_regime",
+])
+
+
 def log_trade(conn: sqlite3.Connection, trade: dict):
     """Insert a new trade record."""
-    cols = [
-        "timestamp", "symbol", "side", "qty", "entry_price", "exit_price",
-        "stop_price", "take_profit_price", "pnl", "pnl_pct",
-        "strategy_version", "signal_type", "signal_context", "status",
-        "opened_at", "closed_at", "atr_at_entry", "rsi_at_entry",
-        "ema_at_entry", "volume_ratio", "market_regime",
-    ]
-    present = {k: trade.get(k) for k in cols if k in trade}
+    present = {k: trade.get(k) for k in _TRADE_COLUMNS if k in trade}
     if "signal_context" in present and isinstance(present["signal_context"], dict):
         present["signal_context"] = json.dumps(present["signal_context"])
     keys = ", ".join(present.keys())

@@ -1,15 +1,15 @@
 """
-Trader - Main execution loop. Runs 24/7 via caffeinate -i.
+Trader - Main execution loop. Runs 24/7 via Docker.
 =============================================================
 This process handles:
-  - Alpaca WebSocket streaming for real-time quotes
+  - Polling Alpaca for 5-min bar data
   - Signal computation using the active strategy
   - Order execution via Alpaca REST API
   - Trade logging to SQLite
   - Hot-reloading strategy.json between bars
 
 Usage:
-    caffeinate -i python trader.py
+    python -u trader.py
 """
 
 import asyncio
@@ -29,7 +29,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from alpaca.data.live import StockDataStream
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -65,7 +64,6 @@ class Trader:
 
         self.trading_client = TradingClient(api_key, secret_key, paper=("paper" in base_url))
         self.data_client = StockHistoricalDataClient(api_key, secret_key)
-        self.stream = StockDataStream(api_key, secret_key)
 
         self.strategy = Strategy()
         self.running = True
@@ -75,6 +73,8 @@ class Trader:
         self.today = None
         self.bar_buffers: dict[str, pd.DataFrame] = {}
         self.last_strategy_reload = 0
+        self._daily_summary_logged = False
+        self._pending_order_symbols: set[str] = set()
 
         db.init_db()
         logger.info("Trader initialized - paper trading mode")
@@ -93,6 +93,8 @@ class Trader:
             self.starting_equity = float(account.equity)
             self.daily_pnl = 0.0
             self.circuit_breaker_triggered = False
+            self._daily_summary_logged = False
+            self._pending_order_symbols.clear()
             self.today = today
             logger.info("New trading day: %s | Equity: $%.2f", today, self.starting_equity)
 
@@ -106,6 +108,8 @@ class Trader:
                 logger.info("Strategy reloaded from strategy.json")
         except FileNotFoundError:
             pass
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.error("Invalid strategy.json, keeping current params: %s", e)
 
     def _fetch_historical_bars(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
         """Fetch recent 5-min bars for indicator computation."""
@@ -148,10 +152,28 @@ class Trader:
                         "volume": "sum",
                     }).dropna()
                     result[symbol] = df_5min.tail(BAR_HISTORY_WINDOW)
+
+        fetched = len(result)
+        if fetched < len(symbols):
+            logger.warning("Fetched bars for %d/%d symbols", fetched, len(symbols))
         return result
+
+    def _get_unrealized_pnl(self) -> float:
+        """Get total unrealized P&L from Alpaca positions."""
+        try:
+            positions = self.trading_client.get_all_positions()
+            return sum(float(p.unrealized_pl) for p in positions)
+        except Exception as e:
+            logger.error("Failed to get unrealized P&L: %s", e)
+            return 0.0
 
     def _execute_signal(self, sig: Signal):
         """Execute a trade based on a signal."""
+        # Dedup: skip if we already submitted an order for this symbol this cycle
+        if sig.symbol in self._pending_order_symbols:
+            logger.info("Order already pending for %s, skipping", sig.symbol)
+            return
+
         account = self.trading_client.get_account()
         portfolio_value = float(account.equity)
 
@@ -173,6 +195,30 @@ class Trader:
             logger.info("Position size is 0 for %s at $%.2f, skipping", sig.symbol, sig.price)
             return
 
+        # Log to database FIRST so we track the intent even if the order fails
+        trade_record = {
+            "timestamp": datetime.now(ET).isoformat(),
+            "symbol": sig.symbol,
+            "side": sig.side,
+            "qty": limits.max_shares,
+            "entry_price": sig.price,
+            "stop_price": limits.stop_price,
+            "take_profit_price": limits.take_profit_price,
+            "strategy_version": self.strategy.VERSION,
+            "signal_type": sig.signal_type,
+            "signal_context": sig.context,
+            "status": "open",
+            "opened_at": datetime.now(ET).isoformat(),
+            "atr_at_entry": sig.atr,
+            "rsi_at_entry": sig.rsi,
+            "ema_at_entry": sig.ema,
+            "volume_ratio": sig.volume_ratio,
+            "market_regime": sig.context.get("market_regime", ""),
+        }
+
+        with db.get_db() as conn:
+            db.log_trade(conn, trade_record)
+
         # Submit order
         order_side = OrderSide.BUY if sig.side == "long" else OrderSide.SELL
         try:
@@ -183,35 +229,23 @@ class Trader:
                 time_in_force=TimeInForce.DAY,
             )
             order = self.trading_client.submit_order(order_request)
+            self._pending_order_symbols.add(sig.symbol)
             logger.info(
                 "ORDER SUBMITTED: %s %d %s @ ~$%.2f | stop=$%.2f target=$%.2f",
                 sig.side.upper(), limits.max_shares, sig.symbol, sig.price,
                 limits.stop_price, limits.take_profit_price,
             )
 
-            # Log to database
-            with db.get_db() as conn:
-                db.log_trade(conn, {
-                    "timestamp": datetime.now(ET).isoformat(),
-                    "symbol": sig.symbol,
-                    "side": sig.side,
-                    "qty": limits.max_shares,
-                    "entry_price": sig.price,
-                    "stop_price": limits.stop_price,
-                    "take_profit_price": limits.take_profit_price,
-                    "strategy_version": self.strategy.VERSION,
-                    "signal_type": sig.signal_type,
-                    "signal_context": sig.context,
-                    "status": "open",
-                    "opened_at": datetime.now(ET).isoformat(),
-                    "atr_at_entry": sig.atr,
-                    "rsi_at_entry": sig.rsi,
-                    "ema_at_entry": sig.ema,
-                    "volume_ratio": sig.volume_ratio,
-                })
-
         except Exception as e:
             logger.error("Order failed for %s: %s", sig.symbol, e)
+            # Mark the DB record as failed since the order didn't go through
+            with db.get_db() as conn:
+                recent = conn.execute(
+                    "SELECT id FROM trades WHERE symbol=? AND status='open' ORDER BY id DESC LIMIT 1",
+                    (sig.symbol,),
+                ).fetchone()
+                if recent:
+                    db.close_trade(conn, recent["id"], sig.price, 0, 0)
 
     def _check_open_positions(self):
         """Check open trades for stop-loss, take-profit, and strategy exits."""
@@ -230,7 +264,8 @@ class Trader:
         for trade in open_trades:
             symbol = trade["symbol"]
             if symbol not in positions:
-                # Position was closed externally
+                # Position was closed externally — use Alpaca's last known price
+                logger.warning("Position %s closed externally, reconciling", symbol)
                 with db.get_db() as conn:
                     db.close_trade(conn, trade["id"], trade["entry_price"], 0, 0)
                 continue
@@ -239,7 +274,7 @@ class Trader:
             current_price = float(pos.current_price)
             entry_price = trade["entry_price"]
             side = trade["side"]
-            atr = trade.get("atr_at_entry", 1.0)
+            atr = trade.get("atr_at_entry") or 1.0
 
             # Check stop-loss
             if side == "long" and current_price <= trade["stop_price"]:
@@ -252,10 +287,11 @@ class Trader:
             elif side == "short" and current_price <= trade["take_profit_price"]:
                 self._close_position(trade, current_price, "take_profit")
             else:
-                # Check strategy-specific exits
-                should_exit, reason = self.strategy.should_exit(trade, current_price, atr)
-                if should_exit:
-                    self._close_position(trade, current_price, reason)
+                # Check strategy-specific exits (guard against bad ATR)
+                if atr > 0:
+                    should_exit, reason = self.strategy.should_exit(trade, current_price, atr)
+                    if should_exit:
+                        self._close_position(trade, current_price, reason)
 
     def _close_position(self, trade: dict, exit_price: float, reason: str):
         """Close a position and log the result."""
@@ -268,7 +304,11 @@ class Trader:
             pnl = (exit_price - entry_price) * qty
         else:
             pnl = (entry_price - exit_price) * qty
-        pnl_pct = pnl / (entry_price * qty) * 100
+
+        if entry_price > 0 and qty > 0:
+            pnl_pct = pnl / (entry_price * qty) * 100
+        else:
+            pnl_pct = 0.0
 
         # Submit closing order
         close_side = OrderSide.SELL if side == "long" else OrderSide.BUY
@@ -289,6 +329,7 @@ class Trader:
                 db.close_trade(conn, trade["id"], exit_price, pnl, pnl_pct)
 
             self.daily_pnl += pnl
+            self._pending_order_symbols.discard(symbol)
 
         except Exception as e:
             logger.error("Failed to close %s: %s", symbol, e)
@@ -296,9 +337,17 @@ class Trader:
     def _check_circuit_breaker(self):
         if self.circuit_breaker_triggered:
             return
-        if risk.circuit_breaker(self.daily_pnl, self.starting_equity):
+
+        # Include unrealized P&L for accurate circuit breaker
+        unrealized = self._get_unrealized_pnl()
+        total_pnl = self.daily_pnl + unrealized
+
+        if risk.circuit_breaker(total_pnl, self.starting_equity):
             self.circuit_breaker_triggered = True
-            logger.warning("CIRCUIT BREAKER: Halting all trading for today")
+            logger.warning(
+                "CIRCUIT BREAKER: Halting trading | Realized=$%.2f Unrealized=$%.2f Total=$%.2f",
+                self.daily_pnl, unrealized, total_pnl,
+            )
             # Close all positions
             with db.get_db() as conn:
                 open_trades = db.get_open_trades(conn)
@@ -313,6 +362,10 @@ class Trader:
 
     def _log_daily_summary(self):
         """Log end-of-day performance summary."""
+        if self._daily_summary_logged:
+            return
+        self._daily_summary_logged = True
+
         with db.get_db() as conn:
             today = datetime.now(ET).date().isoformat()
             trades_today = db.get_trades_since(conn, today)
@@ -327,8 +380,8 @@ class Trader:
                 "date": today,
                 "starting_equity": self.starting_equity,
                 "ending_equity": ending_equity,
-                "daily_pnl": self.daily_pnl,
-                "daily_return_pct": (self.daily_pnl / self.starting_equity * 100) if self.starting_equity else 0,
+                "daily_pnl": ending_equity - self.starting_equity,
+                "daily_return_pct": ((ending_equity - self.starting_equity) / self.starting_equity * 100) if self.starting_equity else 0,
                 "trades_taken": len(closed),
                 "wins": wins,
                 "losses": losses,
@@ -338,16 +391,19 @@ class Trader:
 
         logger.info(
             "Daily Summary: P&L=$%.2f | Trades=%d | W/L=%d/%d | Equity=$%.2f",
-            self.daily_pnl, len(closed), wins, losses, ending_equity,
+            ending_equity - self.starting_equity, len(closed), wins, losses, ending_equity,
         )
 
     async def run(self):
         """Main trading loop."""
         logger.info("Starting trader main loop")
 
+        shutdown_event = asyncio.Event()
+
         def handle_shutdown(sig, frame):
             logger.info("Shutdown signal received")
             self.running = False
+            shutdown_event.set()
 
         signal.signal(signal.SIGINT, handle_shutdown)
         signal.signal(signal.SIGTERM, handle_shutdown)
@@ -358,21 +414,35 @@ class Trader:
                 self._maybe_reload_strategy()
 
                 if not self._is_market_hours():
-                    # Outside market hours - log summary if end of day
+                    # Log summary once after market close (4pm-5pm window)
                     now = datetime.now(ET)
-                    if now.hour == 16 and now.minute < 5 and self.today:
+                    if now.hour >= 16 and now.hour < 17 and self.today and not self._daily_summary_logged:
                         self._log_daily_summary()
-                    await asyncio.sleep(30)
+                    try:
+                        await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+                        break  # shutdown requested
+                    except asyncio.TimeoutError:
+                        pass
                     continue
 
                 if self.circuit_breaker_triggered:
                     logger.debug("Circuit breaker active - waiting for next day")
-                    await asyncio.sleep(60)
+                    try:
+                        await asyncio.wait_for(shutdown_event.wait(), timeout=60)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
                     continue
+
+                # Clear pending orders at start of each cycle
+                self._pending_order_symbols.clear()
 
                 # Fetch bars and compute signals
                 bars = self._fetch_historical_bars(self.strategy.universe)
                 signals = self.strategy.generate_signals(bars)
+
+                if signals:
+                    logger.info("Generated %d signals", len(signals))
 
                 # Execute signals
                 for sig in sorted(signals, key=lambda s: s.strength, reverse=True):
@@ -384,14 +454,22 @@ class Trader:
                 # Check circuit breaker
                 self._check_circuit_breaker()
 
-                # Wait for next bar interval (5 minutes)
-                await asyncio.sleep(300)
+                # Wait for next bar interval (5 minutes), but allow fast shutdown
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=300)
+                    break  # shutdown requested
+                except asyncio.TimeoutError:
+                    pass
 
             except KeyboardInterrupt:
                 break
             except Exception as e:
                 logger.error("Error in main loop: %s", e, exc_info=True)
-                await asyncio.sleep(60)
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=60)
+                    break
+                except asyncio.TimeoutError:
+                    pass
 
         logger.info("Trader stopped")
         self._log_daily_summary()

@@ -239,9 +239,15 @@ Period: Last {days} days
     for dp in daily_perfs[-20:]:
         report += f"| {dp['date']} | ${dp.get('daily_pnl', 0):.2f} | {dp.get('daily_return_pct', 0):.2f}% | {dp.get('trades_taken', 0)} | {dp.get('wins', 0)}/{dp.get('losses', 0)} |\n"
 
+    try:
+        with open(STRATEGY_JSON) as _f:
+            _strategy_version = json.load(_f).get("version", "unknown")
+    except (FileNotFoundError, json.JSONDecodeError):
+        _strategy_version = "unknown"
+
     report += f"""
 ## Current Strategy
-Version: {json.load(open(STRATEGY_JSON)).get('version', 'unknown')}
+Version: {_strategy_version}
 """
 
     with open(PERFORMANCE_REPORT, "w") as f:

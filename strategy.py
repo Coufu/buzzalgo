@@ -98,10 +98,17 @@ class Strategy:
         df["vol_avg"] = df["volume"].rolling(window=self.volume_lookback).mean()
         df["volume_ratio"] = df["volume"] / df["vol_avg"]
         # Regime detection
-        adx_df = ta.adx(df["high"], df["low"], df["close"], length=self.adx_period)
-        if adx_df is not None and f"ADX_{self.adx_period}" in adx_df.columns:
-            df["adx"] = adx_df[f"ADX_{self.adx_period}"]
-        else:
+        try:
+            adx_df = ta.adx(df["high"], df["low"], df["close"], length=self.adx_period)
+            adx_col = f"ADX_{self.adx_period}"
+            if adx_df is not None and adx_col in adx_df.columns:
+                df["adx"] = adx_df[adx_col]
+            else:
+                logger.warning("ADX calculation returned unexpected columns: %s",
+                               list(adx_df.columns) if adx_df is not None else "None")
+                df["adx"] = np.nan
+        except Exception as e:
+            logger.warning("ADX calculation failed: %s", e)
             df["adx"] = np.nan
         df["ema_slope"] = (df["ema"] - df["ema"].shift(5)) / df["ema"].shift(5) * 100
         return df
@@ -196,14 +203,6 @@ class Strategy:
             "time_bucket": time_bucket,
             "entry_hour": entry_hour,
         }
-
-        # Regime filter: skip counter-trend signals in strong trends
-        if regime == "trending_down" and adx > self.adx_trending:
-            # Don't go long in a strong downtrend
-            pass  # allow short signals through
-        elif regime == "trending_up" and adx > self.adx_trending:
-            # Don't go short in a strong uptrend
-            pass  # allow long signals through
 
         # Long signal: RSI crosses above oversold + price above EMA (momentum confirmation)
         if prev_rsi <= self.rsi_oversold and rsi > self.rsi_oversold and price > ema:

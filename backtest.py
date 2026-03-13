@@ -144,11 +144,18 @@ def fetch_historical_data(symbols: list[str], days: int) -> dict[str, pd.DataFra
 
 
 def apply_slippage(price: float, side: str, entry: bool) -> float:
-    """Apply realistic slippage to a price."""
+    """Apply realistic slippage to a price.
+
+    Slippage always makes the fill worse for the trader:
+    - Long entry: price goes UP (pay more)
+    - Long exit: price goes DOWN (receive less)
+    - Short entry: price goes DOWN (sell for less)
+    - Short exit: price goes UP (buy back for more)
+    """
     slip = price * SLIPPAGE_BPS / 10000
     if (side == "long" and entry) or (side == "short" and not entry):
-        return price + slip  # worse fill
-    return price - slip
+        return price + slip  # worse fill: pay more to buy
+    return price - slip  # worse fill: receive less to sell
 
 
 def simulate(strategy: Strategy, bars: dict[str, pd.DataFrame], portfolio_value: float = 100000) -> BacktestResult:
@@ -183,7 +190,20 @@ def simulate(strategy: Strategy, bars: dict[str, pd.DataFrame], portfolio_value:
 
         if current_day != day_str:
             if current_day is not None:
-                daily_equity[current_day] = equity
+                # Mark-to-market: include unrealized P&L in daily equity
+                mtm_equity = equity
+                for pos in open_positions:
+                    symbol = pos["symbol"]
+                    if symbol in bars and not bars[symbol].empty:
+                        # Get last known price for this day
+                        day_bars = bars[symbol][bars[symbol].index <= ts]
+                        if not day_bars.empty:
+                            last_price = day_bars.iloc[-1]["close"]
+                            if pos["side"] == "long":
+                                mtm_equity += (last_price - pos["entry_price"]) * pos["qty"]
+                            else:
+                                mtm_equity += (pos["entry_price"] - last_price) * pos["qty"]
+                daily_equity[current_day] = mtm_equity
             current_day = day_str
             daily_pnl = 0.0
 
@@ -216,26 +236,27 @@ def simulate(strategy: Strategy, bars: dict[str, pd.DataFrame], portfolio_value:
             exit_price = None
             exit_reason = None
 
-            # Stop-loss check
+            # Stop-loss check: fill at market price (which triggered the stop), not the stop price
             if side == "long" and current_price <= pos["stop_price"]:
-                exit_price = apply_slippage(pos["stop_price"], side, False)
+                exit_price = apply_slippage(current_price, side, False)
                 exit_reason = "stop_loss"
             elif side == "short" and current_price >= pos["stop_price"]:
-                exit_price = apply_slippage(pos["stop_price"], side, False)
+                exit_price = apply_slippage(current_price, side, False)
                 exit_reason = "stop_loss"
-            # Take-profit check
+            # Take-profit check: fill at market price that triggered TP
             elif side == "long" and current_price >= pos["take_profit_price"]:
-                exit_price = apply_slippage(pos["take_profit_price"], side, False)
+                exit_price = apply_slippage(current_price, side, False)
                 exit_reason = "take_profit"
             elif side == "short" and current_price <= pos["take_profit_price"]:
-                exit_price = apply_slippage(pos["take_profit_price"], side, False)
+                exit_price = apply_slippage(current_price, side, False)
                 exit_reason = "take_profit"
             else:
                 # Strategy exit
-                should_exit, reason = strategy.should_exit(pos, current_price, current_atr)
-                if should_exit:
-                    exit_price = apply_slippage(current_price, side, False)
-                    exit_reason = reason
+                if current_atr and current_atr > 0:
+                    should_exit, reason = strategy.should_exit(pos, current_price, current_atr)
+                    if should_exit:
+                        exit_price = apply_slippage(current_price, side, False)
+                        exit_reason = reason
 
             if exit_price is not None:
                 if side == "long":
@@ -246,7 +267,7 @@ def simulate(strategy: Strategy, bars: dict[str, pd.DataFrame], portfolio_value:
                 equity += pnl
                 daily_pnl += pnl
                 peak_equity = max(peak_equity, equity)
-                dd = (peak_equity - equity) / peak_equity
+                dd = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0
                 max_drawdown = max(max_drawdown, dd)
 
                 closed_trades.append(BacktestTrade(
@@ -260,9 +281,20 @@ def simulate(strategy: Strategy, bars: dict[str, pd.DataFrame], portfolio_value:
         for pos in positions_to_close:
             open_positions.remove(pos)
 
-        # Circuit breaker check
-        if equity > 0 and daily_pnl / equity <= risk.MAX_DAILY_LOSS_PCT:
-            continue
+        # Circuit breaker check (includes unrealized P&L)
+        unrealized_pnl = 0.0
+        for pos in open_positions:
+            symbol = pos["symbol"]
+            if symbol in bar_windows:
+                cp = bar_windows[symbol].iloc[-1]["close"]
+                if pos["side"] == "long":
+                    unrealized_pnl += (cp - pos["entry_price"]) * pos["qty"]
+                else:
+                    unrealized_pnl += (pos["entry_price"] - cp) * pos["qty"]
+
+        total_daily_pnl = daily_pnl + unrealized_pnl
+        if equity > 0 and total_daily_pnl / equity <= risk.MAX_DAILY_LOSS_PCT:
+            continue  # circuit breaker: skip new signals
 
         # Generate signals
         signals = strategy.generate_signals(bar_windows)
@@ -274,7 +306,7 @@ def simulate(strategy: Strategy, bars: dict[str, pd.DataFrame], portfolio_value:
                 continue
 
             entry_price = apply_slippage(sig.price, sig.side, True)
-            limits = risk.compute_position_limits(equity, entry_price, sig.atr, sig.side)
+            limits = risk.compute_position_limits(equity, sig.price, sig.atr, sig.side)
             if limits.max_shares <= 0:
                 continue
 
@@ -286,12 +318,22 @@ def simulate(strategy: Strategy, bars: dict[str, pd.DataFrame], portfolio_value:
                 "stop_price": limits.stop_price,
                 "take_profit_price": limits.take_profit_price,
                 "atr": sig.atr,
+                "atr_at_entry": sig.atr,
                 "entry_time": str(ts),
             })
 
-    # Record final day
+    # Record final day with mark-to-market
     if current_day:
-        daily_equity[current_day] = equity
+        mtm_equity = equity
+        for pos in open_positions:
+            symbol = pos["symbol"]
+            if symbol in bars and not bars[symbol].empty:
+                last_price = bars[symbol].iloc[-1]["close"]
+                if pos["side"] == "long":
+                    mtm_equity += (last_price - pos["entry_price"]) * pos["qty"]
+                else:
+                    mtm_equity += (pos["entry_price"] - last_price) * pos["qty"]
+        daily_equity[current_day] = mtm_equity
 
     # Compute metrics
     wins = [t for t in closed_trades if t.pnl > 0]
@@ -303,7 +345,7 @@ def simulate(strategy: Strategy, bars: dict[str, pd.DataFrame], portfolio_value:
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
     total_pnl = sum(t.pnl for t in closed_trades)
 
-    # Daily returns for Sharpe
+    # Daily returns for Sharpe — use actual sample count for annualization
     equity_series = sorted(daily_equity.items())
     daily_returns = []
     for j in range(1, len(equity_series)):
