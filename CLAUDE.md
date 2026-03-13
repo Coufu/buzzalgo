@@ -91,6 +91,9 @@ You are the strategy engineer. Each night, you read trade data, identify weaknes
 
 ## Commands
 ```bash
+# Full setup on a new Mac
+./setup.sh
+
 # Run the trader
 caffeinate -i python trader.py
 
@@ -108,4 +111,25 @@ python improve.py --cron
 
 # Generate performance report only
 python improve.py --report-only
+
+# Run sentiment scanner (single scan)
+python sentiment.py --once
+
+# Run parameter sweep
+python sweep.py --days 60 --top 10
+
+# Start all Docker services
+docker compose up -d --build
 ```
+
+## Scheduled Services
+| Service | How | Schedule | What |
+|---------|-----|----------|------|
+| Trader | Docker (`docker compose`) | 24/7 | Executes trades during market hours |
+| Dashboard | Docker (`docker compose`) | 24/7 | FastAPI dashboard on port 8080 |
+| Sentiment | Docker (`docker compose`) | Every 30 min | Scans headlines, classifies via Ollama |
+| Caffeinate | launchd (`com.buzzalgo.caffeinate`) | 24/7 | Prevents Mac sleep |
+| Improve | launchd (`com.buzzalgo.improve`) | 5pm ET Mon-Fri | Claude Code analyzes + improves strategy |
+| Sweep | launchd (`com.buzzalgo.sweep`) | 2am Sat+Sun | Parameter grid search |
+
+Plist templates are in `launchd/` — `setup.sh` installs them automatically.
