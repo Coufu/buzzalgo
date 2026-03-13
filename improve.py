@@ -44,6 +44,17 @@ IMPROVEMENT_LOG = PROJECT_ROOT / "improvement_log.md"
 PERFORMANCE_REPORT = PROJECT_ROOT / "performance_report.md"
 
 
+def _parse_signal_context(trade: dict) -> dict:
+    """Parse signal_context JSON from a trade record."""
+    ctx = trade.get("signal_context")
+    if isinstance(ctx, str):
+        try:
+            return json.loads(ctx)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return ctx if isinstance(ctx, dict) else {}
+
+
 def generate_performance_report(days: int = 30) -> str:
     """Analyze recent trades and generate a performance report.
 
@@ -110,15 +121,47 @@ def generate_performance_report(days: int = 30) -> str:
         if (t.get("pnl") or 0) > 0:
             signal_breakdown[sig]["wins"] += 1
 
-    # Analyze stop-loss vs take-profit exits
-    exit_reasons = {}
+    # Regime breakdown
+    regime_breakdown = {}
     for t in closed:
-        ctx = t.get("signal_context")
-        if isinstance(ctx, str):
+        ctx = _parse_signal_context(t)
+        regime = ctx.get("market_regime", "unknown")
+        if regime not in regime_breakdown:
+            regime_breakdown[regime] = {"count": 0, "wins": 0, "pnl": 0}
+        regime_breakdown[regime]["count"] += 1
+        regime_breakdown[regime]["pnl"] += t.get("pnl", 0)
+        if (t.get("pnl") or 0) > 0:
+            regime_breakdown[regime]["wins"] += 1
+
+    # Time-of-day breakdown
+    time_breakdown = {}
+    for t in closed:
+        ctx = _parse_signal_context(t)
+        bucket = ctx.get("time_bucket", "unknown")
+        if bucket not in time_breakdown:
+            time_breakdown[bucket] = {"count": 0, "wins": 0, "pnl": 0}
+        time_breakdown[bucket]["count"] += 1
+        time_breakdown[bucket]["pnl"] += t.get("pnl", 0)
+        if (t.get("pnl") or 0) > 0:
+            time_breakdown[bucket]["wins"] += 1
+
+    # Holding period analysis
+    holding_periods = []
+    for t in closed:
+        opened = t.get("opened_at")
+        closed_at = t.get("closed_at")
+        if opened and closed_at:
             try:
-                ctx = json.loads(ctx)
-            except json.JSONDecodeError:
-                ctx = {}
+                dt_open = datetime.fromisoformat(opened)
+                dt_close = datetime.fromisoformat(closed_at)
+                minutes = (dt_close - dt_open).total_seconds() / 60
+                holding_periods.append({
+                    "minutes": minutes,
+                    "pnl": t.get("pnl", 0),
+                    "won": (t.get("pnl") or 0) > 0,
+                })
+            except (ValueError, TypeError):
+                pass
 
     # Build report
     report = f"""# Performance Report
@@ -143,11 +186,50 @@ Period: Last {days} days
         wr = data["wins"] / data["count"] if data["count"] else 0
         report += f"| {sig} | {data['count']} | {wr:.1%} | ${data['pnl']:.2f} |\n"
 
+    report += """
+## Market Regime Breakdown
+| Regime | Count | Win Rate | Total P&L |
+|--------|-------|----------|-----------|
+"""
+    for regime, data in regime_breakdown.items():
+        wr = data["wins"] / data["count"] if data["count"] else 0
+        report += f"| {regime} | {data['count']} | {wr:.1%} | ${data['pnl']:.2f} |\n"
+
+    report += """
+## Time-of-Day Breakdown
+| Time Bucket | Count | Win Rate | Total P&L |
+|-------------|-------|----------|-----------|
+"""
+    for bucket, data in sorted(time_breakdown.items()):
+        wr = data["wins"] / data["count"] if data["count"] else 0
+        report += f"| {bucket} | {data['count']} | {wr:.1%} | ${data['pnl']:.2f} |\n"
+
+    if holding_periods:
+        short_holds = [h for h in holding_periods if h["minutes"] < 30]
+        medium_holds = [h for h in holding_periods if 30 <= h["minutes"] < 120]
+        long_holds = [h for h in holding_periods if h["minutes"] >= 120]
+
+        report += """
+## Holding Period Analysis
+| Duration | Count | Win Rate | Avg P&L |
+|----------|-------|----------|---------|
+"""
+        for label, holds in [("< 30 min", short_holds), ("30-120 min", medium_holds), ("> 120 min", long_holds)]:
+            if holds:
+                wr = sum(1 for h in holds if h["won"]) / len(holds)
+                avg_pnl = sum(h["pnl"] for h in holds) / len(holds)
+                report += f"| {label} | {len(holds)} | {wr:.1%} | ${avg_pnl:.2f} |\n"
+
     report += f"""
 ## Losing Trades Analysis
 """
     for t in sorted(losses, key=lambda x: x.get("pnl", 0))[:10]:
-        report += f"- {t['symbol']} {t['side']}: ${t.get('pnl', 0):.2f} | RSI={t.get('rsi_at_entry', 'N/A')} | Signal={t.get('signal_type', 'N/A')}\n"
+        ctx = _parse_signal_context(t)
+        report += (
+            f"- {t['symbol']} {t['side']}: ${t.get('pnl', 0):.2f} | "
+            f"RSI={t.get('rsi_at_entry', 'N/A')} | Signal={t.get('signal_type', 'N/A')} | "
+            f"Regime={ctx.get('market_regime', 'N/A')} | Time={ctx.get('time_bucket', 'N/A')}\n"
+        )
 
     report += f"""
 ## Daily Performance
@@ -170,6 +252,63 @@ Version: {json.load(open(STRATEGY_JSON)).get('version', 'unknown')}
     return str(PERFORMANCE_REPORT)
 
 
+def check_kill_criteria() -> tuple[bool, str]:
+    """Check if the strategy has hit kill criteria and needs a full pivot.
+
+    Returns:
+        (kill_switch_active, reason)
+    """
+    # Load kill criteria from strategy.json
+    try:
+        with open(STRATEGY_JSON) as f:
+            config = json.load(f)
+        criteria = config.get("kill_criteria", {})
+    except (FileNotFoundError, json.JSONDecodeError):
+        criteria = {}
+
+    min_trades = criteria.get("min_trades", 50)
+    min_sharpe = criteria.get("min_sharpe", 0.3)
+    min_win_rate = criteria.get("min_win_rate", 0.35)
+
+    with db.get_db() as conn:
+        closed_trades = conn.execute(
+            "SELECT pnl FROM trades WHERE status='closed'"
+        ).fetchall()
+        daily_perfs = conn.execute(
+            "SELECT * FROM daily_performance ORDER BY date DESC LIMIT 30"
+        ).fetchall()
+
+    total_closed = len(closed_trades)
+    if total_closed < min_trades:
+        return False, f"Only {total_closed}/{min_trades} trades — too early to evaluate"
+
+    wins = sum(1 for t in closed_trades if (t["pnl"] or 0) > 0)
+    win_rate = wins / total_closed
+
+    daily_returns = [
+        dp["daily_pnl"] / dp["starting_equity"]
+        for dp in daily_perfs
+        if dp["starting_equity"] and dp["starting_equity"] > 0 and dp["daily_pnl"] is not None
+    ]
+    if daily_returns and np.std(daily_returns) > 0:
+        recent_sharpe = np.mean(daily_returns) / np.std(daily_returns) * np.sqrt(252)
+    else:
+        recent_sharpe = 0.0
+
+    reasons = []
+    if recent_sharpe < min_sharpe:
+        reasons.append(f"Sharpe={recent_sharpe:.2f} < {min_sharpe}")
+    if win_rate < min_win_rate:
+        reasons.append(f"WinRate={win_rate:.1%} < {min_win_rate:.0%}")
+
+    if reasons:
+        reason = f"KILL CRITERIA: {', '.join(reasons)} after {total_closed} trades"
+        logger.warning(reason)
+        return True, reason
+
+    return False, ""
+
+
 def run_claude_code_improvement():
     """Trigger Claude Code to analyze and improve the strategy.
 
@@ -181,33 +320,75 @@ def run_claude_code_improvement():
         logger.info("No report generated - skipping improvement cycle")
         return
 
+    kill_active, kill_reason = check_kill_criteria()
+
+    kill_directive = ""
+    if kill_active:
+        kill_directive = f"""
+## CRITICAL: KILL CRITERIA TRIGGERED
+{kill_reason}
+
+Parameter tweaks are NOT sufficient. You must try a FUNDAMENTALLY different approach:
+- Different signal type (e.g., breakout, momentum, volatility contraction)
+- Different indicator combination entirely
+- Different universe focus (sector rotation, fewer symbols)
+- Consider time-of-day filtering based on the performance data
+- Bump the version to X.0.0 to reflect a major strategy pivot
+Do NOT just adjust RSI thresholds or EMA periods — that has been tried.
+"""
+
     prompt = f"""You are the strategy improvement engine for AlgoTrader Pro.
 
 Read the following files to understand the current state:
 1. CLAUDE.md - your operating context and constraints
-2. performance_report.md - latest performance analysis
+2. performance_report.md - latest performance analysis (INCLUDES regime and time-of-day breakdowns)
 3. strategy.py - the current strategy implementation
-4. improvement_log.md - history of past improvements
-5. strategy.json - current parameters
+4. improvement_log.md - history of past improvements (AVOID repeating failed hypotheses)
+5. strategy.json - current parameters and kill criteria
+{kill_directive}
+## Analysis Framework
 
-Your task:
-1. ANALYZE: Identify the biggest weakness in recent performance
-2. HYPOTHESIZE: Form 1-3 specific, testable hypotheses for improvement
-3. IMPLEMENT: Make minimal, surgical changes to strategy.py
+Before making changes, perform this structured analysis:
+
+### 1. Regime Analysis
+- Which market regimes (trending_up, trending_down, ranging, transitional) are profitable?
+- Which are losing money? Consider filtering out unprofitable regimes.
+
+### 2. Time-of-Day Analysis
+- Which time buckets (open_30, morning, midday, afternoon, close_30) perform best?
+- Should we avoid trading during certain periods?
+
+### 3. Holding Period Analysis
+- Are short holds (<30min) or longer holds (>120min) more profitable?
+- Does this suggest our stops are too tight or our take-profits too aggressive?
+
+### 4. Signal Quality
+- What is the win rate and avg P&L per signal type?
+- Are we generating too many low-quality signals?
+
+### 5. Stop-Loss Analysis
+- What % of trades hit stop-loss vs take-profit vs trailing-stop?
+- If most trades hit stop-loss, the entry timing or stop distance may be wrong.
+
+## Your Task
+1. ANALYZE: Use the framework above to identify the #1 actionable weakness
+2. HYPOTHESIZE: Form 1-2 specific, testable hypotheses
+3. IMPLEMENT: Make minimal, surgical changes to strategy.py and/or strategy.json
 4. VALIDATE: Run `python backtest.py` and check the result
 5. DEPLOY OR REVERT:
    - If backtest Sharpe improves by >= 0.05 AND max drawdown doesn't increase by > 2%: commit changes
    - Otherwise: revert changes and log the failed hypothesis
 
-CONSTRAINTS:
+## Constraints
 - You may ONLY modify strategy.py and strategy.json
 - You may NOT modify risk.py, trader.py, or any other files
 - Changes must be minimal and well-commented
 - Log your hypothesis and outcome to improvement_log.md
-
-After running the backtest, output the result clearly."""
+- After running the backtest, output the result clearly"""
 
     logger.info("Triggering Claude Code improvement cycle...")
+    if kill_active:
+        logger.warning("Kill switch active: %s", kill_reason)
 
     try:
         result = subprocess.run(

@@ -1,10 +1,11 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 1.0.0
+Version: 1.1.0
 Name: Momentum + Mean Reversion Hybrid
 Description: RSI(14) oversold/overbought signals with EMA(20)
-             direction filter and volume confirmation on 5-min bars.
+             direction filter, volume confirmation, ADX regime
+             detection, and time-of-day awareness on 5-min bars.
 
 Claude Code may freely modify:
   - RSI periods & thresholds
@@ -13,6 +14,7 @@ Claude Code may freely modify:
   - Universe (within equities)
   - Entry/exit conditions
   - Take profit multipliers
+  - ADX thresholds for regime detection
 
 Claude Code may NOT modify:
   - Position sizing (handled by risk.py)
@@ -51,7 +53,7 @@ class Signal:
 class Strategy:
     """Baseline momentum + mean-reversion hybrid strategy."""
 
-    VERSION = "1.0.0"
+    VERSION = "1.1.0"
 
     def __init__(self, params: dict | None = None):
         if params is None:
@@ -63,8 +65,12 @@ class Strategy:
         self.volume_multiplier = params.get("volume_multiplier", 1.5)
         self.volume_lookback = params.get("volume_lookback", 20)
         self.atr_period = params.get("atr_period", 14)
+        self.adx_period = params.get("adx_period", 14)
+        self.adx_trending = params.get("adx_trending_threshold", 25)
+        self.adx_ranging = params.get("adx_ranging_threshold", 20)
         self.universe = params.get("universe", ["SPY", "QQQ", "IWM"])
-        logger.info("Strategy v%s initialized: RSI(%d) EMA(%d)", self.VERSION, self.rsi_period, self.ema_period)
+        logger.info("Strategy v%s initialized: RSI(%d) EMA(%d) ADX(%d)",
+                     self.VERSION, self.rsi_period, self.ema_period, self.adx_period)
 
     @staticmethod
     def _load_params() -> dict:
@@ -81,7 +87,7 @@ class Strategy:
         logger.info("Strategy parameters hot-reloaded")
 
     def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add RSI, EMA, ATR, and volume ratio columns to a DataFrame of bars.
+        """Add RSI, EMA, ATR, ADX, and volume ratio columns to a DataFrame of bars.
 
         Expects columns: open, high, low, close, volume.
         """
@@ -91,7 +97,39 @@ class Strategy:
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=self.atr_period)
         df["vol_avg"] = df["volume"].rolling(window=self.volume_lookback).mean()
         df["volume_ratio"] = df["volume"] / df["vol_avg"]
+        # Regime detection
+        adx_df = ta.adx(df["high"], df["low"], df["close"], length=self.adx_period)
+        if adx_df is not None and f"ADX_{self.adx_period}" in adx_df.columns:
+            df["adx"] = adx_df[f"ADX_{self.adx_period}"]
+        else:
+            df["adx"] = np.nan
+        df["ema_slope"] = (df["ema"] - df["ema"].shift(5)) / df["ema"].shift(5) * 100
         return df
+
+    def _classify_regime(self, adx: float, ema_slope: float) -> str:
+        """Classify market regime from ADX and EMA slope."""
+        if adx > self.adx_trending:
+            return "trending_up" if ema_slope > 0 else "trending_down"
+        elif adx < self.adx_ranging:
+            return "ranging"
+        return "transitional"
+
+    @staticmethod
+    def _classify_time_bucket(ts) -> str:
+        """Classify a bar timestamp into a time-of-day bucket."""
+        if hasattr(ts, "hour"):
+            h, m = ts.hour, ts.minute
+        else:
+            return "unknown"
+        if h == 9:
+            return "open_30"
+        elif h < 12:
+            return "morning"
+        elif h < 14:
+            return "midday"
+        elif h < 15 or (h == 15 and m < 30):
+            return "afternoon"
+        return "close_30"
 
     def generate_signals(self, bars: dict[str, pd.DataFrame]) -> list[Signal]:
         """Generate trading signals for all symbols.
@@ -122,12 +160,22 @@ class Strategy:
             atr = latest["atr"]
             price = latest["close"]
             volume_ratio = latest["volume_ratio"] if not pd.isna(latest["volume_ratio"]) else 0
+            adx = latest["adx"] if not pd.isna(latest.get("adx")) else 0
+            ema_slope = latest["ema_slope"] if not pd.isna(latest.get("ema_slope")) else 0
+
+            regime = self._classify_regime(adx, ema_slope)
+            time_bucket = self._classify_time_bucket(df.index[-1])
+            entry_hour = df.index[-1].hour if hasattr(df.index[-1], "hour") else None
 
             # Volume filter - skip low-volume bars
             if volume_ratio < self.volume_multiplier:
                 continue
 
-            signal = self._evaluate_entry(symbol, rsi, prev["rsi"], ema, atr, price, volume_ratio)
+            signal = self._evaluate_entry(
+                symbol, rsi, prev["rsi"], ema, atr, price, volume_ratio,
+                regime=regime, adx=adx, ema_slope=ema_slope,
+                time_bucket=time_bucket, entry_hour=entry_hour,
+            )
             if signal is not None:
                 signals.append(signal)
 
@@ -136,12 +184,34 @@ class Strategy:
     def _evaluate_entry(
         self, symbol: str, rsi: float, prev_rsi: float,
         ema: float, atr: float, price: float, volume_ratio: float,
+        *, regime: str = "", adx: float = 0, ema_slope: float = 0,
+        time_bucket: str = "", entry_hour: int | None = None,
     ) -> Signal | None:
         """Evaluate whether current conditions warrant an entry signal."""
 
+        extra_context = {
+            "market_regime": regime,
+            "adx": round(adx, 2),
+            "ema_slope": round(ema_slope, 4),
+            "time_bucket": time_bucket,
+            "entry_hour": entry_hour,
+        }
+
+        # Regime filter: skip counter-trend signals in strong trends
+        if regime == "trending_down" and adx > self.adx_trending:
+            # Don't go long in a strong downtrend
+            pass  # allow short signals through
+        elif regime == "trending_up" and adx > self.adx_trending:
+            # Don't go short in a strong uptrend
+            pass  # allow long signals through
+
         # Long signal: RSI crosses above oversold + price above EMA (momentum confirmation)
         if prev_rsi <= self.rsi_oversold and rsi > self.rsi_oversold and price > ema:
-            strength = min(1.0, (self.rsi_oversold - prev_rsi + 10) / 20 * volume_ratio / self.volume_multiplier)
+            # Skip longs in strong downtrend
+            if regime == "trending_down" and adx > self.adx_trending:
+                return None
+
+            strength = min(1.0, (self.rsi_oversold - prev_rsi + 10) / 20 * volume_ratio / max(self.volume_multiplier, 0.01))
             return Signal(
                 symbol=symbol,
                 side="long",
@@ -156,12 +226,17 @@ class Strategy:
                     "prev_rsi": prev_rsi,
                     "price_above_ema": True,
                     "ema_distance_pct": round((price - ema) / ema * 100, 3),
+                    **extra_context,
                 },
             )
 
         # Short signal: RSI crosses below overbought + price below EMA
         if prev_rsi >= self.rsi_overbought and rsi < self.rsi_overbought and price < ema:
-            strength = min(1.0, (prev_rsi - self.rsi_overbought + 10) / 20 * volume_ratio / self.volume_multiplier)
+            # Skip shorts in strong uptrend
+            if regime == "trending_up" and adx > self.adx_trending:
+                return None
+
+            strength = min(1.0, (prev_rsi - self.rsi_overbought + 10) / 20 * volume_ratio / max(self.volume_multiplier, 0.01))
             return Signal(
                 symbol=symbol,
                 side="short",
@@ -176,6 +251,7 @@ class Strategy:
                     "prev_rsi": prev_rsi,
                     "price_below_ema": True,
                     "ema_distance_pct": round((price - ema) / ema * 100, 3),
+                    **extra_context,
                 },
             )
 

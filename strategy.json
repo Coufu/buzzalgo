@@ -1,21 +1,29 @@
 {
-    "version": "1.0.0",
-    "name": "Momentum + Mean Reversion Hybrid v1.0",
-    "description": "RSI(14) oversold/overbought signals with EMA(20) direction filter and volume confirmation",
+    "version": "1.1.0",
+    "name": "Momentum + Mean Reversion Hybrid v1.1",
+    "description": "RSI(14) oversold/overbought signals with EMA(20) direction filter, volume confirmation, and ADX regime detection",
     "parameters": {
         "rsi_period": 14,
-        "rsi_oversold": 30,
-        "rsi_overbought": 70,
+        "rsi_oversold": 40,
+        "rsi_overbought": 60,
         "ema_period": 20,
-        "volume_multiplier": 1.0,
+        "volume_multiplier": 0.5,
         "volume_lookback": 20,
         "atr_period": 14,
+        "adx_period": 14,
+        "adx_trending_threshold": 25,
+        "adx_ranging_threshold": 20,
         "take_profit_atr_mult": 3.0,
         "trailing_activation_mult": 1.5
     },
     "universe": ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA",
                   "JPM", "V", "JNJ", "UNH", "HD", "PG", "MA", "DIS", "BAC", "XOM",
                   "AVGO", "COST", "LLY"],
+    "kill_criteria": {
+        "min_trades": 50,
+        "min_sharpe": 0.3,
+        "min_win_rate": 0.35
+    },
     "timeframe": "5Min",
     "updated_at": null,
     "sharpe_at_deploy": null
