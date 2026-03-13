@@ -1,5 +1,5 @@
 """
-Active Trading Strategy — Claude Code modifies this file nightly.
+Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
 Version: 1.0.0
 Name: Momentum + Mean Reversion Hybrid
@@ -123,7 +123,7 @@ class Strategy:
             price = latest["close"]
             volume_ratio = latest["volume_ratio"] if not pd.isna(latest["volume_ratio"]) else 0
 
-            # Volume filter — skip low-volume bars
+            # Volume filter - skip low-volume bars
             if volume_ratio < self.volume_multiplier:
                 continue
 

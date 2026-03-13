@@ -1,5 +1,5 @@
 """
-Database module — SQLite trade log persistence.
+Database module - SQLite trade log persistence.
 """
 
 import sqlite3

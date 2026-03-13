@@ -1,5 +1,5 @@
 """
-Risk Management Module — LOCKED
+Risk Management Module - LOCKED
 ================================
 This file contains position sizing, stop-loss, and circuit breaker logic.
 Claude Code is NEVER allowed to modify this file.
@@ -12,7 +12,7 @@ from datetime import date
 
 logger = logging.getLogger(__name__)
 
-# Hard constraints — do not modify
+# Hard constraints - do not modify
 POSITION_SIZE_PCT = 0.02        # 2% of portfolio per trade
 STOP_LOSS_ATR_MULT = 1.5        # 1.5x ATR(14) from entry
 TAKE_PROFIT_ATR_MULT = 3.0      # 3x ATR(14) from entry

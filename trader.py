@@ -1,5 +1,5 @@
 """
-Trader — Main execution loop. Runs 24/7 via caffeinate -i.
+Trader - Main execution loop. Runs 24/7 via caffeinate -i.
 =============================================================
 This process handles:
   - Alpaca WebSocket streaming for real-time quotes
@@ -76,7 +76,7 @@ class Trader:
         self.last_strategy_reload = 0
 
         db.init_db()
-        logger.info("Trader initialized — paper trading mode")
+        logger.info("Trader initialized - paper trading mode")
 
     def _is_market_hours(self) -> bool:
         now = datetime.now(ET)
@@ -356,7 +356,7 @@ class Trader:
                 self._maybe_reload_strategy()
 
                 if not self._is_market_hours():
-                    # Outside market hours — log summary if end of day
+                    # Outside market hours - log summary if end of day
                     now = datetime.now(ET)
                     if now.hour == 16 and now.minute < 5 and self.today:
                         self._log_daily_summary()
@@ -364,7 +364,7 @@ class Trader:
                     continue
 
                 if self.circuit_breaker_triggered:
-                    logger.debug("Circuit breaker active — waiting for next day")
+                    logger.debug("Circuit breaker active - waiting for next day")
                     await asyncio.sleep(60)
                     continue
 

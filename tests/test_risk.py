@@ -1,4 +1,4 @@
-"""Tests for risk management module — validates locked constraints."""
+"""Tests for risk management module - validates locked constraints."""
 
 import pytest
 from risk import (

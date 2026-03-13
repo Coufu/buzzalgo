@@ -60,14 +60,14 @@ def generate_performance_report(days: int = 30) -> str:
         ).fetchall()
 
     if not trades:
-        logger.info("No trades in the last %d days — skipping report", days)
+        logger.info("No trades in the last %d days - skipping report", days)
         return ""
 
     closed = [t for t in trades if t["status"] == "closed"]
     total = len(closed)
 
     if total == 0:
-        logger.info("No closed trades — skipping report")
+        logger.info("No closed trades - skipping report")
         return ""
 
     wins = [t for t in closed if (t.get("pnl") or 0) > 0]
@@ -178,17 +178,17 @@ def run_claude_code_improvement():
     """
     report_path = generate_performance_report()
     if not report_path:
-        logger.info("No report generated — skipping improvement cycle")
+        logger.info("No report generated - skipping improvement cycle")
         return
 
     prompt = f"""You are the strategy improvement engine for AlgoTrader Pro.
 
 Read the following files to understand the current state:
-1. CLAUDE.md — your operating context and constraints
-2. performance_report.md — latest performance analysis
-3. strategy.py — the current strategy implementation
-4. improvement_log.md — history of past improvements
-5. strategy.json — current parameters
+1. CLAUDE.md - your operating context and constraints
+2. performance_report.md - latest performance analysis
+3. strategy.py - the current strategy implementation
+4. improvement_log.md - history of past improvements
+5. strategy.json - current parameters
 
 Your task:
 1. ANALYZE: Identify the biggest weakness in recent performance
@@ -223,7 +223,7 @@ After running the backtest, output the result clearly."""
     except subprocess.TimeoutExpired:
         logger.error("Claude Code improvement cycle timed out after 10 minutes")
     except FileNotFoundError:
-        logger.error("Claude Code CLI not found — make sure 'claude' is in PATH")
+        logger.error("Claude Code CLI not found - make sure 'claude' is in PATH")
 
 
 def log_improvement(hypothesis: str, changes: str, backtest_sharpe: float,
@@ -271,7 +271,7 @@ def run_improvement_cycle():
 
 def run_cron():
     """Run the improvement loop on a schedule (5pm ET daily)."""
-    logger.info("Starting improvement cron scheduler — runs at 5:00pm ET")
+    logger.info("Starting improvement cron scheduler - runs at 5:00pm ET")
 
     schedule.every().monday.at("17:00").do(run_improvement_cycle)
     schedule.every().tuesday.at("17:00").do(run_improvement_cycle)

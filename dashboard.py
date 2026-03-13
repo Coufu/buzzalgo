@@ -1,5 +1,5 @@
 """
-Dashboard — FastAPI server on port 8080
+Dashboard - FastAPI server on port 8080
 =========================================
 Live P&L, open positions, strategy evolution, and alerts.
 
