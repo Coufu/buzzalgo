@@ -15,6 +15,7 @@ import logging
 import os
 import subprocess
 import sys
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -23,9 +24,56 @@ import numpy as np
 import pandas as pd
 import schedule
 import time
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import db
 from backtest import run_backtest
+
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+
+
+def _notify_slack(text: str):
+    """Send a Slack notification via webhook."""
+    if not SLACK_WEBHOOK_URL:
+        return
+    try:
+        payload = json.dumps({"text": text}).encode()
+        req = urllib.request.Request(
+            SLACK_WEBHOOK_URL, data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        logger.debug("Slack notification failed: %s", e)
+
+
+def _build_improvement_slack_message(output: str) -> None:
+    """Parse Claude Code output and send a detailed Slack summary."""
+    if "SUMMARY_START" in output and "SUMMARY_END" in output:
+        block = output.split("SUMMARY_START")[1].split("SUMMARY_END")[0].strip()
+        lines = {}
+        for line in block.splitlines():
+            if ":" in line:
+                key, val = line.split(":", 1)
+                lines[key.strip().lower()] = val.strip()
+
+        deployed = "deployed" in lines.get("outcome", "").lower()
+        emoji = ":rocket:" if deployed else ":rewind:"
+        msg = (
+            f"{emoji} *Improvement Cycle Complete*\n"
+            f"*Analysis:* {lines.get('analysis', 'N/A')}\n"
+            f"*Hypothesis:* {lines.get('hypothesis', 'N/A')}\n"
+            f"*Changes:* {lines.get('changes', 'N/A')}\n"
+            f"*Backtest:* {lines.get('backtest', 'N/A')}\n"
+            f"*Outcome:* {lines.get('outcome', 'N/A')}"
+        )
+        _notify_slack(msg)
+    else:
+        summary = output[-500:]
+        _notify_slack(f":white_check_mark: *Improvement cycle complete*\n```{summary}```")
+
 
 logger = logging.getLogger("improve")
 logging.basicConfig(
@@ -255,6 +303,11 @@ Version: {_strategy_version}
 
     logger.info("Performance report generated: Sharpe=%.4f, Win Rate=%.1f%%, P&L=$%.2f",
                 sharpe, win_rate * 100, total_pnl)
+    _notify_slack(
+        f":bar_chart: *Performance Report*\n"
+        f"Sharpe: {sharpe:.4f} | Win Rate: {win_rate:.1%} | P&L: ${total_pnl:.2f}\n"
+        f"Max DD: {max_dd:.2%} | Trades: {total} | PF: {profit_factor:.2f}"
+    )
     return str(PERFORMANCE_REPORT)
 
 
@@ -390,11 +443,22 @@ Before making changes, perform this structured analysis:
 - You may NOT modify risk.py, trader.py, or any other files
 - Changes must be minimal and well-commented
 - Log your hypothesis and outcome to improvement_log.md
-- After running the backtest, output the result clearly"""
+- After running the backtest, output the result clearly
+- At the very end, output a summary block in this exact format:
+  SUMMARY_START
+  Analysis: <1-2 sentence key finding>
+  Hypothesis: <what you tested>
+  Changes: <what you changed>
+  Backtest: <Sharpe, win rate, max DD numbers>
+  Outcome: <DEPLOYED or REVERTED + reason>
+  SUMMARY_END"""
 
     logger.info("Triggering Claude Code improvement cycle...")
     if kill_active:
         logger.warning("Kill switch active: %s", kill_reason)
+        _notify_slack(f":rotating_light: *KILL CRITERIA TRIGGERED*\n{kill_reason}\nClaude Code will attempt a major strategy pivot.")
+
+    _notify_slack(":brain: *Improvement cycle started* — Claude Code is analyzing strategy performance...")
 
     try:
         result = subprocess.run(
@@ -407,10 +471,17 @@ Before making changes, perform this structured analysis:
         logger.info("Claude Code output:\n%s", result.stdout[-2000:] if result.stdout else "No output")
         if result.returncode != 0:
             logger.error("Claude Code error:\n%s", result.stderr[-1000:] if result.stderr else "Unknown error")
+            _notify_slack(f":x: *Improvement cycle failed* — Claude Code returned error (exit code {result.returncode})")
+        else:
+            output = (result.stdout or "No output").strip()
+            # Try to extract structured summary
+            slack_msg = _build_improvement_slack_message(output)
     except subprocess.TimeoutExpired:
         logger.error("Claude Code improvement cycle timed out after 10 minutes")
+        _notify_slack(":warning: *Improvement cycle timed out* after 10 minutes")
     except FileNotFoundError:
         logger.error("Claude Code CLI not found - make sure 'claude' is in PATH")
+        _notify_slack(":x: *Improvement cycle failed* — Claude Code CLI not found in PATH")
 
 
 def log_improvement(hypothesis: str, changes: str, backtest_sharpe: float,
