@@ -19,6 +19,7 @@ import os
 import signal
 import sys
 import time
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -54,6 +55,23 @@ logging.basicConfig(
 ET = ZoneInfo("America/New_York")
 STRATEGY_JSON = Path(__file__).parent / "strategy.json"
 BAR_HISTORY_WINDOW = 50  # bars to fetch for indicator computation
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+
+
+def _notify_slack(text: str):
+    """Send a notification to Slack. Fails silently."""
+    if not SLACK_WEBHOOK_URL:
+        return
+    try:
+        payload = json.dumps({"text": text}).encode()
+        req = urllib.request.Request(
+            SLACK_WEBHOOK_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        logger.debug("Slack notification failed: %s", e)
 
 
 class Trader:
@@ -235,6 +253,10 @@ class Trader:
                 sig.side.upper(), limits.max_shares, sig.symbol, sig.price,
                 limits.stop_price, limits.take_profit_price,
             )
+            _notify_slack(
+                f":chart_with_upwards_trend: *OPEN {sig.side.upper()}* {limits.max_shares} {sig.symbol} @ ${sig.price:.2f}\n"
+                f"Stop: ${limits.stop_price:.2f} | Target: ${limits.take_profit_price:.2f} | Signal: {sig.signal_type}"
+            )
 
         except Exception as e:
             logger.error("Order failed for %s: %s", sig.symbol, e)
@@ -330,6 +352,12 @@ class Trader:
 
             self.daily_pnl += pnl
             self._pending_order_symbols.discard(symbol)
+
+            pnl_emoji = ":white_check_mark:" if pnl >= 0 else ":red_circle:"
+            _notify_slack(
+                f"{pnl_emoji} *CLOSE {side.upper()}* {symbol} @ ${exit_price:.2f}\n"
+                f"P&L: ${pnl:+.2f} ({pnl_pct:+.2f}%) | Reason: {reason}"
+            )
 
         except Exception as e:
             logger.error("Failed to close %s: %s", symbol, e)
