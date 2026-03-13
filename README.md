@@ -13,19 +13,26 @@ Two runtime layers communicating via SQLite and git:
 
 ### Prerequisites
 
-- macOS with Python 3.12+
+- macOS (Apple Silicon)
+- [Homebrew](https://brew.sh/)
 - [Alpaca](https://alpaca.markets/) paper trading account
 - [Claude Code](https://claude.com/claude-code) CLI (for the improvement loop)
 
 ### Install
 
 ```bash
+# Install Python 3.13 if you don't have it
+brew install python@3.13
+
+# Clone and set up
 git clone https://github.com/Coufu/buzzalgo.git
 cd buzzalgo
-python3 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+> **Note:** macOS ships with an older Python (3.8/3.9) that won't work. You need Python 3.12+ installed via Homebrew. Verify with `python3.13 --version`.
 
 ### Configure
 
