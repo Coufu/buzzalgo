@@ -20,11 +20,18 @@
         "sentiment_veto_threshold": 0.5,
         "sentiment_lookback_hours": 4
     },
-    "universe": ["SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "GLD", "SLV",
-                  "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "NFLX", "AMD", "CRM",
-                  "JPM", "V", "JNJ", "UNH", "HD", "PG", "MA", "DIS", "BAC", "XOM",
-                  "AVGO", "COST", "LLY", "ABBV", "WMT", "KO", "PEP", "MRK", "ORCL", "ADBE",
-                  "T", "INTC", "CSCO", "PYPL", "SQ", "COIN", "UBER", "ABNB", "SNAP", "PLTR"],
+    "universe": [
+        "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV", "XLI", "XLP",
+        "GLD", "SLV", "EEM", "TLT", "HYG", "ARKK", "SOXL", "TQQQ",
+        "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "NFLX", "AMD", "CRM",
+        "JPM", "V", "JNJ", "UNH", "HD", "PG", "MA", "DIS", "BAC", "XOM",
+        "AVGO", "COST", "LLY", "ABBV", "WMT", "KO", "PEP", "MRK", "ORCL", "ADBE",
+        "T", "INTC", "CSCO", "PYPL", "SQ", "COIN", "UBER", "ABNB", "SNAP", "PLTR",
+        "SOFI", "HOOD", "RIVN", "LCID", "NIO", "MARA", "RIOT", "SMCI", "ARM", "MSTR",
+        "RBLX", "DKNG", "ENPH", "FSLR", "CCL", "AAL", "DAL", "UAL", "F", "GM",
+        "ROKU", "SHOP", "SE", "BABA", "JD", "PDD", "BILI", "GRAB", "NU", "MELI",
+        "CRWD", "PANW", "ZS", "NET", "DDOG", "MDB", "SNOW", "PATH", "U", "RKLB"
+    ],
     "kill_criteria": {
         "min_trades": 50,
         "min_sharpe": 0.3,
