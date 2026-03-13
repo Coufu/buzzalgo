@@ -50,41 +50,35 @@ ALPACA_BASE_URL=https://paper-api.alpaca.markets
 
 ## Usage
 
-### Start the dashboard
+### Docker (recommended)
 
 ```bash
-python dashboard.py
+docker compose up -d
 ```
 
-Open http://localhost:8080 for live P&L, positions, and strategy evolution.
-
-### Start the trader
+This starts all three services (trader, dashboard, improvement loop) with auto-restart. Dashboard at http://localhost:8080.
 
 ```bash
-caffeinate -i python trader.py
+docker compose logs -f trader    # watch trade activity
+docker compose down              # stop everything
 ```
 
-Trades during market hours (9:30am–4:00pm ET), idles otherwise.
+### Manual (without Docker)
 
-### Run a backtest
+```bash
+source .venv/bin/activate
+caffeinate -i python trader.py   # terminal 1: trader
+python dashboard.py              # terminal 2: dashboard on :8080
+python improve.py --cron         # terminal 3: nightly improvement loop
+```
+
+### Other commands
 
 ```bash
 python backtest.py              # 60-day walk-forward validation
 python backtest.py --days 90    # custom window
-```
-
-### Run the improvement loop
-
-```bash
-python improve.py               # one-shot improvement cycle
-python improve.py --cron        # scheduled nightly at 5pm ET
-python improve.py --report-only # generate performance report without modifying strategy
-```
-
-### Run tests
-
-```bash
-python -m pytest tests/ -v
+python improve.py --report-only # generate performance report only
+python -m pytest tests/ -v      # run tests
 ```
 
 ## Strategy

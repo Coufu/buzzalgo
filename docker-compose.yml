@@ -1,0 +1,35 @@
+services:
+  trader:
+    build: .
+    command: python trader.py
+    restart: always
+    env_file: .env
+    volumes:
+      - ./trades.db:/app/trades.db
+      - ./strategy.json:/app/strategy.json
+      - ./strategy.py:/app/strategy.py
+    depends_on:
+      - dashboard
+
+  dashboard:
+    build: .
+    command: python dashboard.py
+    restart: always
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trades.db:/app/trades.db
+      - ./strategy.json:/app/strategy.json
+
+  improve:
+    build: .
+    command: python improve.py --cron
+    restart: always
+    env_file: .env
+    volumes:
+      - ./trades.db:/app/trades.db
+      - ./strategy.json:/app/strategy.json
+      - ./strategy.py:/app/strategy.py
+      - ./improvement_log.md:/app/improvement_log.md
+      - ./.git:/app/.git
