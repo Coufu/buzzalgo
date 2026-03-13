@@ -107,6 +107,28 @@ def init_db(db_path: str | Path = DB_PATH):
                 commit_hash TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sentiment_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                scanned_at TEXT NOT NULL,
+                headline TEXT NOT NULL,
+                source TEXT,
+                sentiment TEXT NOT NULL,
+                score REAL NOT NULL,
+                confidence REAL,
+                model TEXT,
+                headline_hash TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sentiment_symbol_time
+            ON sentiment_scores (symbol, scanned_at)
+        """)
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_sentiment_dedup
+            ON sentiment_scores (headline_hash)
+        """)
     logger.info("Database initialized at %s", db_path)
 
 
@@ -162,6 +184,32 @@ def get_daily_pnl(conn: sqlite3.Connection, trade_date: str) -> float:
         (trade_date,),
     ).fetchone()
     return row["total"] if row else 0.0
+
+
+def insert_sentiment(conn: sqlite3.Connection, record: dict):
+    """Insert a sentiment score, ignoring duplicates by headline_hash."""
+    conn.execute(
+        """INSERT OR IGNORE INTO sentiment_scores
+           (symbol, scanned_at, headline, source, sentiment, score, confidence, model, headline_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            record["symbol"], record["scanned_at"], record["headline"],
+            record.get("source"), record["sentiment"], record["score"],
+            record.get("confidence"), record.get("model"), record.get("headline_hash"),
+        ),
+    )
+
+
+def get_aggregate_sentiment(conn: sqlite3.Connection, hours: int = 4) -> dict[str, float]:
+    """Return average sentiment score per symbol over the last N hours."""
+    rows = conn.execute(
+        """SELECT symbol, AVG(score) as avg_score
+           FROM sentiment_scores
+           WHERE scanned_at >= datetime('now', ?)
+           GROUP BY symbol""",
+        (f"-{hours} hours",),
+    ).fetchall()
+    return {row["symbol"]: row["avg_score"] for row in rows}
 
 
 def log_daily_performance(conn: sqlite3.Connection, perf: dict):

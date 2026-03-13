@@ -68,6 +68,10 @@ class Strategy:
         self.adx_period = params.get("adx_period", 14)
         self.adx_trending = params.get("adx_trending_threshold", 25)
         self.adx_ranging = params.get("adx_ranging_threshold", 20)
+        self.sentiment_enabled = params.get("sentiment_enabled", False)
+        self.sentiment_weight = params.get("sentiment_weight", 0.3)
+        self.sentiment_veto_threshold = params.get("sentiment_veto_threshold", 0.5)
+        self.sentiment_lookback_hours = params.get("sentiment_lookback_hours", 4)
         self.universe = params.get("universe", ["SPY", "QQQ", "IWM"])
         logger.info("Strategy v%s initialized: RSI(%d) EMA(%d) ADX(%d)",
                      self.VERSION, self.rsi_period, self.ema_period, self.adx_period)
@@ -148,6 +152,16 @@ class Strategy:
         Returns:
             List of Signal objects for actionable setups.
         """
+        # Load sentiment scores if enabled
+        sentiment_map: dict[str, float] = {}
+        if self.sentiment_enabled:
+            try:
+                import db as _db
+                with _db.get_db() as conn:
+                    sentiment_map = _db.get_aggregate_sentiment(conn, self.sentiment_lookback_hours)
+            except Exception:
+                pass  # No sentiment data is fine — defaults to neutral
+
         signals = []
         for symbol, df in bars.items():
             if symbol not in self.universe:
@@ -178,10 +192,13 @@ class Strategy:
             if volume_ratio < self.volume_multiplier:
                 continue
 
+            sentiment_score = sentiment_map.get(symbol, 0.0)
+
             signal = self._evaluate_entry(
                 symbol, rsi, prev["rsi"], ema, atr, price, volume_ratio,
                 regime=regime, adx=adx, ema_slope=ema_slope,
                 time_bucket=time_bucket, entry_hour=entry_hour,
+                sentiment_score=sentiment_score,
             )
             if signal is not None:
                 signals.append(signal)
@@ -193,6 +210,7 @@ class Strategy:
         ema: float, atr: float, price: float, volume_ratio: float,
         *, regime: str = "", adx: float = 0, ema_slope: float = 0,
         time_bucket: str = "", entry_hour: int | None = None,
+        sentiment_score: float = 0.0,
     ) -> Signal | None:
         """Evaluate whether current conditions warrant an entry signal."""
 
@@ -202,6 +220,7 @@ class Strategy:
             "ema_slope": round(ema_slope, 4),
             "time_bucket": time_bucket,
             "entry_hour": entry_hour,
+            "sentiment_score": round(sentiment_score, 3),
         }
 
         # Long signal: RSI crosses above oversold + price above EMA (momentum confirmation)
@@ -209,8 +228,11 @@ class Strategy:
             # Skip longs in strong downtrend
             if regime == "trending_down" and adx > self.adx_trending:
                 return None
-
             strength = min(1.0, (self.rsi_oversold - prev_rsi + 10) / 20 * volume_ratio / max(self.volume_multiplier, 0.01))
+            # Sentiment boost/dampen signal strength
+            if self.sentiment_enabled and sentiment_score != 0:
+                strength *= (1.0 + sentiment_score * self.sentiment_weight)
+                strength = max(0.01, min(1.0, strength))
             return Signal(
                 symbol=symbol,
                 side="long",
@@ -234,8 +256,11 @@ class Strategy:
             # Skip shorts in strong uptrend
             if regime == "trending_up" and adx > self.adx_trending:
                 return None
-
             strength = min(1.0, (prev_rsi - self.rsi_overbought + 10) / 20 * volume_ratio / max(self.volume_multiplier, 0.01))
+            # Sentiment boost/dampen (invert: bearish sentiment boosts short strength)
+            if self.sentiment_enabled and sentiment_score != 0:
+                strength *= (1.0 - sentiment_score * self.sentiment_weight)
+                strength = max(0.01, min(1.0, strength))
             return Signal(
                 symbol=symbol,
                 side="short",

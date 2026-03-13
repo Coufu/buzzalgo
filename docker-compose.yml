@@ -24,6 +24,25 @@ services:
       timeout: 5s
       retries: 3
 
+  sentiment:
+    build: .
+    command: python -u sentiment.py
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./strategy.json:/app/strategy.json
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OLLAMA_HOST=http://host.docker.internal:11434
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
   dashboard:
     build: .
     command: python dashboard.py
