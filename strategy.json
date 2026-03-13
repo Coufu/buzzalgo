@@ -20,9 +20,11 @@
         "sentiment_veto_threshold": 0.5,
         "sentiment_lookback_hours": 4
     },
-    "universe": ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA",
+    "universe": ["SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "GLD", "SLV",
+                  "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "NFLX", "AMD", "CRM",
                   "JPM", "V", "JNJ", "UNH", "HD", "PG", "MA", "DIS", "BAC", "XOM",
-                  "AVGO", "COST", "LLY"],
+                  "AVGO", "COST", "LLY", "ABBV", "WMT", "KO", "PEP", "MRK", "ORCL", "ADBE",
+                  "T", "INTC", "CSCO", "PYPL", "SQ", "COIN", "UBER", "ABNB", "SNAP", "PLTR"],
     "kill_criteria": {
         "min_trades": 50,
         "min_sharpe": 0.3,
