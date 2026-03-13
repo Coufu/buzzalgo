@@ -2,12 +2,62 @@
 # BuzzAlgo Setup Script
 # Run this on a fresh Mac to set up the full trading system.
 #
-# Usage: ./setup.sh
+# Usage:
+#   ./setup.sh                    # Fresh setup
+#   ./setup.sh backup             # Backup DB to data/backup/
+#   ./setup.sh restore <file>     # Restore DB from backup
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+DATA_DIR="$SCRIPT_DIR/data"
+BACKUP_DIR="$DATA_DIR/backup"
+
+# --- Backup/Restore commands ---
+if [ "${1:-}" = "backup" ]; then
+    mkdir -p "$BACKUP_DIR"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    BACKUP_FILE="$BACKUP_DIR/trades_$TIMESTAMP.db"
+    # Stop containers to avoid WAL issues
+    echo "Stopping Docker services..."
+    cd "$SCRIPT_DIR" && docker compose stop 2>/dev/null || true
+    cp "$DATA_DIR/trades.db" "$BACKUP_FILE"
+    # Copy WAL/SHM files if they exist
+    [ -f "$DATA_DIR/trades.db-wal" ] && cp "$DATA_DIR/trades.db-wal" "$BACKUP_FILE-wal"
+    [ -f "$DATA_DIR/trades.db-shm" ] && cp "$DATA_DIR/trades.db-shm" "$BACKUP_FILE-shm"
+    echo "Backed up to: $BACKUP_FILE"
+    echo "Restarting Docker services..."
+    docker compose up -d
+    echo ""
+    echo "To migrate: copy $BACKUP_FILE to the new machine, then run:"
+    echo "  ./setup.sh restore $BACKUP_FILE"
+    exit 0
+fi
+
+if [ "${1:-}" = "restore" ]; then
+    RESTORE_FILE="${2:-}"
+    if [ -z "$RESTORE_FILE" ] || [ ! -f "$RESTORE_FILE" ]; then
+        echo "Usage: ./setup.sh restore <path-to-backup.db>"
+        echo ""
+        if [ -d "$BACKUP_DIR" ]; then
+            echo "Available backups:"
+            ls -lh "$BACKUP_DIR"/trades_*.db 2>/dev/null || echo "  (none)"
+        fi
+        exit 1
+    fi
+    echo "Stopping Docker services..."
+    cd "$SCRIPT_DIR" && docker compose stop 2>/dev/null || true
+    mkdir -p "$DATA_DIR"
+    cp "$RESTORE_FILE" "$DATA_DIR/trades.db"
+    # Copy WAL/SHM if they came with the backup
+    [ -f "$RESTORE_FILE-wal" ] && cp "$RESTORE_FILE-wal" "$DATA_DIR/trades.db-wal"
+    [ -f "$RESTORE_FILE-shm" ] && cp "$RESTORE_FILE-shm" "$DATA_DIR/trades.db-shm"
+    echo "Restored from: $RESTORE_FILE"
+    echo "Restarting Docker services..."
+    docker compose up -d
+    exit 0
+fi
 
 echo "=== BuzzAlgo Setup ==="
 echo "Project dir: $SCRIPT_DIR"
