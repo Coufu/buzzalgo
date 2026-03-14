@@ -533,6 +533,76 @@ def log_improvement(hypothesis: str, changes: str, backtest_sharpe: float,
         )
 
 
+def send_daily_journal():
+    """Send an end-of-day trading journal to Slack."""
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+
+    with db.get_db() as conn:
+        # Today's closed trades
+        closed = conn.execute(
+            "SELECT * FROM trades WHERE date(closed_at) = ? AND status = 'closed' ORDER BY pnl DESC",
+            (today,),
+        ).fetchall()
+        closed = [dict(r) for r in closed]
+
+        # Today's open trades
+        open_trades = conn.execute(
+            "SELECT * FROM trades WHERE status = 'open'",
+        ).fetchall()
+        open_trades = [dict(r) for r in open_trades]
+
+        # Daily performance
+        dp = conn.execute(
+            "SELECT * FROM daily_performance WHERE date = ?",
+            (today,),
+        ).fetchone()
+
+        # Sentiment
+        sentiment_rows = conn.execute(
+            "SELECT symbol, AVG(score) as avg FROM sentiment_scores "
+            "WHERE scanned_at >= datetime('now', '-24 hours') GROUP BY symbol",
+        ).fetchall()
+
+    if not closed and not open_trades and not dp:
+        logger.info("No trading activity today — skipping journal")
+        return
+
+    # Build journal
+    total_pnl = sum(t.get("pnl", 0) for t in closed)
+    wins = [t for t in closed if (t.get("pnl") or 0) > 0]
+    losses = [t for t in closed if (t.get("pnl") or 0) <= 0]
+
+    equity = dp["ending_equity"] if dp and dp["ending_equity"] else "N/A"
+    equity_str = f"${equity:,.2f}" if isinstance(equity, (int, float)) else equity
+
+    pnl_emoji = ":chart_with_upwards_trend:" if total_pnl >= 0 else ":chart_with_downwards_trend:"
+    date_str = datetime.now(ET).strftime("%b %d")
+
+    msg = f"{pnl_emoji} *Daily Journal — {date_str}*\n"
+    msg += f"P&L: ${total_pnl:+.2f} | Trades: {len(closed)} ({len(wins)}W/{len(losses)}L)\n"
+
+    if closed:
+        best = max(closed, key=lambda t: t.get("pnl", 0))
+        worst = min(closed, key=lambda t: t.get("pnl", 0))
+        msg += f"Best: {best['symbol']} {best['side']} ${best.get('pnl', 0):+.2f}\n"
+        exit_reason = worst.get("signal_type", "")
+        msg += f"Worst: {worst['symbol']} {worst['side']} ${worst.get('pnl', 0):+.2f}\n"
+
+    msg += f"Equity: {equity_str}\n"
+
+    if open_trades:
+        open_syms = ", ".join(t["symbol"] for t in open_trades)
+        msg += f"Open positions: {open_syms}\n"
+
+    if sentiment_rows:
+        avg_sentiment = sum(r["avg"] for r in sentiment_rows) / len(sentiment_rows)
+        label = "bullish" if avg_sentiment > 0.2 else "bearish" if avg_sentiment < -0.2 else "neutral"
+        msg += f"Sentiment: {label} ({avg_sentiment:+.2f})"
+
+    _notify_slack(msg)
+    logger.info("Daily journal sent to Slack")
+
+
 def run_improvement_cycle():
     """Run one complete improvement cycle."""
     logger.info("=" * 60)
@@ -563,9 +633,12 @@ def main():
     parser = argparse.ArgumentParser(description="Strategy improvement loop")
     parser.add_argument("--cron", action="store_true", help="Run as cron scheduler")
     parser.add_argument("--report-only", action="store_true", help="Only generate performance report")
+    parser.add_argument("--journal", action="store_true", help="Send daily journal to Slack")
     args = parser.parse_args()
 
-    if args.report_only:
+    if args.journal:
+        send_daily_journal()
+    elif args.report_only:
         generate_performance_report()
     elif args.cron:
         run_cron()
