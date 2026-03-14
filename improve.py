@@ -113,10 +113,12 @@ def generate_performance_report(days: int = 30) -> str:
 
     with db.get_db() as conn:
         trades = db.get_trades_since(conn, since)
-        daily_perfs = conn.execute(
-            "SELECT * FROM daily_performance WHERE date >= ? ORDER BY date",
-            (since[:10],),
-        ).fetchall()
+        daily_perfs = [
+            dict(r) for r in conn.execute(
+                "SELECT * FROM daily_performance WHERE date >= ? ORDER BY date",
+                (since[:10],),
+            ).fetchall()
+        ]
 
     if not trades:
         logger.info("No trades in the last %d days - skipping report", days)
@@ -333,9 +335,11 @@ def check_kill_criteria() -> tuple[bool, str]:
         closed_trades = conn.execute(
             "SELECT pnl FROM trades WHERE status='closed'"
         ).fetchall()
-        daily_perfs = conn.execute(
-            "SELECT * FROM daily_performance ORDER BY date DESC LIMIT 30"
-        ).fetchall()
+        daily_perfs = [
+            dict(r) for r in conn.execute(
+                "SELECT * FROM daily_performance ORDER BY date DESC LIMIT 30"
+            ).fetchall()
+        ]
 
     total_closed = len(closed_trades)
     if total_closed < min_trades:

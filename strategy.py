@@ -73,6 +73,9 @@ SECTOR_MAP = {
     "RIVN": "EV", "LCID": "EV", "NIO": "EV",
     "DKNG": "Consumer", "SNAP": "Tech", "PLTR": "Tech", "ROKU": "Tech", "RKLB": "Tech",
     "T": "Telecom",
+    # Crypto
+    "BTC/USD": "Crypto", "ETH/USD": "Crypto", "SOL/USD": "Crypto", "AVAX/USD": "Crypto",
+    "DOGE/USD": "Crypto", "LINK/USD": "Crypto", "LTC/USD": "Crypto", "UNI/USD": "Crypto",
 }
 
 
@@ -95,9 +98,10 @@ class Strategy:
 
     VERSION = "1.1.0"
 
-    def __init__(self, params: dict | None = None):
+    def __init__(self, params: dict | None = None, mode: str = "equity"):
+        self.mode = mode
         if params is None:
-            params = self._load_params()
+            params = self._load_params(mode)
         self.rsi_period = params.get("rsi_period", 14)
         self.rsi_oversold = params.get("rsi_oversold", 30)
         self.rsi_overbought = params.get("rsi_overbought", 70)
@@ -122,17 +126,20 @@ class Strategy:
                      self.VERSION, self.rsi_period, self.ema_period, self.adx_period)
 
     @staticmethod
-    def _load_params() -> dict:
+    def _load_params(mode: str = "equity") -> dict:
         if STRATEGY_JSON.exists():
             with open(STRATEGY_JSON) as f:
                 data = json.load(f)
+            if mode == "crypto" and "crypto" in data:
+                crypto = data["crypto"]
+                return {**crypto.get("parameters", {}), "universe": crypto.get("universe", [])}
             return {**data.get("parameters", {}), "universe": data.get("universe", [])}
         return {}
 
     def reload_params(self):
         """Hot-reload parameters from strategy.json without restarting."""
-        params = self._load_params()
-        self.__init__(params)
+        params = self._load_params(self.mode)
+        self.__init__(params, mode=self.mode)
         logger.info("Strategy parameters hot-reloaded")
 
     def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:

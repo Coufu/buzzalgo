@@ -26,8 +26,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 
@@ -96,23 +96,46 @@ class BacktestResult:
 
 
 def fetch_historical_data(symbols: list[str], days: int) -> dict[str, pd.DataFrame]:
-    """Fetch historical bar data from Alpaca."""
+    """Fetch historical bar data from Alpaca (stocks and/or crypto)."""
     api_key = os.environ["ALPACA_API_KEY"]
     secret_key = os.environ["ALPACA_SECRET_KEY"]
-    client = StockHistoricalDataClient(api_key, secret_key)
 
     end = datetime.now(ET)
     start = end - timedelta(days=days + 10)  # extra buffer for weekends
 
-    request = StockBarsRequest(
-        symbol_or_symbols=symbols,
-        timeframe=TimeFrame.Minute,
-        start=start,
-        end=end,
-        feed=DataFeed.IEX,
-    )
-    barset = client.get_stock_bars(request)
+    stock_symbols = [s for s in symbols if "/" not in s]
+    crypto_symbols = [s for s in symbols if "/" in s]
 
+    result = {}
+
+    if stock_symbols:
+        client = StockHistoricalDataClient(api_key, secret_key)
+        request = StockBarsRequest(
+            symbol_or_symbols=stock_symbols,
+            timeframe=TimeFrame.Minute,
+            start=start,
+            end=end,
+            feed=DataFeed.IEX,
+        )
+        barset = client.get_stock_bars(request)
+        result.update(_parse_barset(barset, stock_symbols))
+
+    if crypto_symbols:
+        crypto_client = CryptoHistoricalDataClient(api_key, secret_key)
+        request = CryptoBarsRequest(
+            symbol_or_symbols=crypto_symbols,
+            timeframe=TimeFrame.Minute,
+            start=start,
+            end=end,
+        )
+        barset = crypto_client.get_crypto_bars(request)
+        result.update(_parse_barset(barset, crypto_symbols))
+
+    return result
+
+
+def _parse_barset(barset, symbols: list[str]) -> dict[str, pd.DataFrame]:
+    """Parse an Alpaca barset response into 5-min DataFrames."""
     result = {}
     for symbol in symbols:
         if symbol not in barset.data:
@@ -131,7 +154,6 @@ def fetch_historical_data(symbols: list[str], days: int) -> dict[str, pd.DataFra
             df = pd.DataFrame(rows)
             df["timestamp"] = pd.to_datetime(df["timestamp"])
             df = df.set_index("timestamp")
-            # Resample to 5-min bars
             df_5min = df.resample("5min").agg({
                 "open": "first",
                 "high": "max",
@@ -409,12 +431,13 @@ def walk_forward_validation(
     return test_result
 
 
-def run_backtest(days: int = 60, train_split: float = 0.67) -> BacktestResult:
+def run_backtest(days: int = 60, train_split: float = 0.67, mode: str = "equity") -> BacktestResult:
     """Run a full backtest with walk-forward validation.
 
     Args:
         days: Number of days of historical data.
         train_split: Train/test split ratio.
+        mode: "equity" or "crypto".
 
     Returns:
         BacktestResult from walk-forward validation.
@@ -422,8 +445,11 @@ def run_backtest(days: int = 60, train_split: float = 0.67) -> BacktestResult:
     with open(STRATEGY_JSON) as f:
         config = json.load(f)
 
-    strategy = Strategy()
-    symbols = config.get("universe", strategy.universe)
+    strategy = Strategy(mode=mode)
+    if mode == "crypto" and "crypto" in config:
+        symbols = config["crypto"].get("universe", strategy.universe)
+    else:
+        symbols = config.get("universe", strategy.universe)
 
     logger.info("Fetching %d days of historical data for %d symbols...", days, len(symbols))
     bars = fetch_historical_data(symbols, days)
@@ -445,9 +471,10 @@ def main():
     parser = argparse.ArgumentParser(description="Run strategy backtest")
     parser.add_argument("--days", type=int, default=60, help="Days of historical data")
     parser.add_argument("--train-split", type=float, default=0.67, help="Train/test split ratio")
+    parser.add_argument("--mode", choices=["equity", "crypto"], default="equity", help="Asset class to backtest")
     args = parser.parse_args()
 
-    result = run_backtest(args.days, args.train_split)
+    result = run_backtest(args.days, args.train_split, args.mode)
     print(result)
     return 0 if result.sharpe_ratio > 0 else 1
 

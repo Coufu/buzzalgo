@@ -78,6 +78,32 @@ launchctl unload ~/Library/LaunchAgents/com.buzzalgo.improve.plist
 - -3% daily loss circuit breaker
 - Paper trading only (no real money)
 
+## Slack Notifications
+
+The system can send trade alerts, daily journals, scanner results, and improvement summaries to Slack.
+
+### Setup
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app (or use an existing one)
+2. Under **Incoming Webhooks**, toggle it on and click **Add New Webhook to Workspace**
+3. Pick the channel you want alerts in and copy the webhook URL
+4. Add it to your `.env`:
+
+```
+SLACK_WEBHOOK_URL=<your-webhook-url>
+```
+
+That's it. Once set, these services will post to Slack automatically:
+
+| Service | What it posts |
+|---------|---------------|
+| Trader | Trade opens/closes with P&L |
+| Journal | Daily performance summary (4:30pm ET) |
+| Scanner | Triple bottom pattern alerts (4:45pm ET) |
+| Improve | Strategy change results (after each cycle) |
+
+If `SLACK_WEBHOOK_URL` is empty or unset, all services run normally — they just skip the Slack notifications silently.
+
 ## Other Commands
 
 ```bash

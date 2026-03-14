@@ -30,8 +30,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
@@ -58,6 +58,11 @@ BAR_HISTORY_WINDOW = 50  # bars to fetch for indicator computation
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 
+def is_crypto_symbol(symbol: str) -> bool:
+    """Check if a symbol is a crypto pair (e.g. BTC/USD)."""
+    return "/" in symbol
+
+
 def _notify_slack(text: str):
     """Send a notification to Slack. Fails silently."""
     if not SLACK_WEBHOOK_URL:
@@ -82,8 +87,10 @@ class Trader:
 
         self.trading_client = TradingClient(api_key, secret_key, paper=("paper" in base_url))
         self.data_client = StockHistoricalDataClient(api_key, secret_key)
+        self.crypto_data_client = CryptoHistoricalDataClient(api_key, secret_key)
 
-        self.strategy = Strategy()
+        self.strategy = Strategy(mode="equity")
+        self.crypto_strategy = Strategy(mode="crypto")
         self.running = True
         self.circuit_breaker_triggered = False
         self.daily_pnl = 0.0
@@ -122,6 +129,7 @@ class Trader:
             mtime = STRATEGY_JSON.stat().st_mtime
             if mtime > self.last_strategy_reload:
                 self.strategy.reload_params()
+                self.crypto_strategy.reload_params()
                 self.last_strategy_reload = mtime
                 logger.info("Strategy reloaded from strategy.json")
         except FileNotFoundError:
@@ -130,7 +138,7 @@ class Trader:
             logger.error("Invalid strategy.json, keeping current params: %s", e)
 
     def _fetch_historical_bars(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
-        """Fetch recent 5-min bars for indicator computation."""
+        """Fetch recent 5-min bars for equity symbols."""
         end = datetime.now(ET)
         start = end - timedelta(days=5)  # enough for ~50 5-min bars
 
@@ -143,6 +151,33 @@ class Trader:
         )
         barset = self.data_client.get_stock_bars(request)
 
+        result = self._parse_barset(barset, symbols)
+        fetched = len(result)
+        if fetched < len(symbols):
+            logger.warning("Fetched stock bars for %d/%d symbols", fetched, len(symbols))
+        return result
+
+    def _fetch_crypto_bars(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
+        """Fetch recent 5-min bars for crypto symbols."""
+        end = datetime.now(ET)
+        start = end - timedelta(days=5)
+
+        request = CryptoBarsRequest(
+            symbol_or_symbols=symbols,
+            timeframe=TimeFrame.Minute,
+            start=start,
+            end=end,
+        )
+        barset = self.crypto_data_client.get_crypto_bars(request)
+
+        result = self._parse_barset(barset, symbols)
+        fetched = len(result)
+        if fetched < len(symbols):
+            logger.warning("Fetched crypto bars for %d/%d symbols", fetched, len(symbols))
+        return result
+
+    def _parse_barset(self, barset, symbols: list[str]) -> dict[str, pd.DataFrame]:
+        """Parse an Alpaca barset response into 5-min DataFrames."""
         result = {}
         for symbol in symbols:
             if symbol in barset.data:
@@ -159,7 +194,6 @@ class Trader:
                     })
                 if rows:
                     df = pd.DataFrame(rows)
-                    # Resample to 5-min bars
                     df["timestamp"] = pd.to_datetime(df["timestamp"])
                     df = df.set_index("timestamp")
                     df_5min = df.resample("5min").agg({
@@ -170,10 +204,6 @@ class Trader:
                         "volume": "sum",
                     }).dropna()
                     result[symbol] = df_5min.tail(BAR_HISTORY_WINDOW)
-
-        fetched = len(result)
-        if fetched < len(symbols):
-            logger.warning("Fetched bars for %d/%d symbols", fetched, len(symbols))
         return result
 
     def _get_unrealized_pnl(self) -> float:
@@ -209,16 +239,26 @@ class Trader:
                 return
 
         limits = risk.compute_position_limits(portfolio_value, sig.price, sig.atr, sig.side)
-        if limits.max_shares <= 0:
-            logger.info("Position size is 0 for %s at $%.2f, skipping", sig.symbol, sig.price)
-            return
+
+        # For crypto, compute fractional quantity since risk.py floors to int
+        if is_crypto_symbol(sig.symbol):
+            dollar_amount = portfolio_value * risk.POSITION_SIZE_PCT
+            qty = round(dollar_amount / sig.price, 6)  # 6 decimal places for crypto
+            if qty <= 0:
+                logger.info("Position size is 0 for %s at $%.2f, skipping", sig.symbol, sig.price)
+                return
+        else:
+            qty = limits.max_shares
+            if qty <= 0:
+                logger.info("Position size is 0 for %s at $%.2f, skipping", sig.symbol, sig.price)
+                return
 
         # Log to database FIRST so we track the intent even if the order fails
         trade_record = {
             "timestamp": datetime.now(ET).isoformat(),
             "symbol": sig.symbol,
             "side": sig.side,
-            "qty": limits.max_shares,
+            "qty": qty,
             "entry_price": sig.price,
             "stop_price": limits.stop_price,
             "take_profit_price": limits.take_profit_price,
@@ -239,18 +279,19 @@ class Trader:
 
         # Submit order
         order_side = OrderSide.BUY if sig.side == "long" else OrderSide.SELL
+        tif = TimeInForce.GTC if is_crypto_symbol(sig.symbol) else TimeInForce.DAY
         try:
             order_request = MarketOrderRequest(
                 symbol=sig.symbol,
-                qty=limits.max_shares,
+                qty=qty,
                 side=order_side,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=tif,
             )
             order = self.trading_client.submit_order(order_request)
             self._pending_order_symbols.add(sig.symbol)
             logger.info(
-                "ORDER SUBMITTED: %s %d %s @ ~$%.2f | stop=$%.2f target=$%.2f",
-                sig.side.upper(), limits.max_shares, sig.symbol, sig.price,
+                "ORDER SUBMITTED: %s %s %s @ ~$%.2f | stop=$%.2f target=$%.2f",
+                sig.side.upper(), qty, sig.symbol, sig.price,
                 limits.stop_price, limits.take_profit_price,
             )
             _notify_slack(
@@ -334,12 +375,13 @@ class Trader:
 
         # Submit closing order
         close_side = OrderSide.SELL if side == "long" else OrderSide.BUY
+        tif = TimeInForce.GTC if is_crypto_symbol(symbol) else TimeInForce.DAY
         try:
             order_request = MarketOrderRequest(
                 symbol=symbol,
                 qty=qty,
                 side=close_side,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=tif,
             )
             self.trading_client.submit_order(order_request)
             logger.info(
@@ -441,45 +483,57 @@ class Trader:
                 self._reset_daily_state()
                 self._maybe_reload_strategy()
 
-                if not self._is_market_hours():
+                market_open = self._is_market_hours()
+
+                if not market_open:
                     # Log summary once after market close (4pm-5pm window)
                     now = datetime.now(ET)
                     if now.hour >= 16 and now.hour < 17 and self.today and not self._daily_summary_logged:
                         self._log_daily_summary()
-                    try:
-                        await asyncio.wait_for(shutdown_event.wait(), timeout=30)
-                        break  # shutdown requested
-                    except asyncio.TimeoutError:
-                        pass
-                    continue
 
                 if self.circuit_breaker_triggered:
-                    logger.debug("Circuit breaker active - waiting for next day")
-                    try:
-                        await asyncio.wait_for(shutdown_event.wait(), timeout=60)
-                        break
-                    except asyncio.TimeoutError:
+                    if not market_open:
+                        # After hours with circuit breaker — still trade crypto
                         pass
-                    continue
+                    else:
+                        logger.debug("Circuit breaker active - waiting for next day")
+                        try:
+                            await asyncio.wait_for(shutdown_event.wait(), timeout=60)
+                            break
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
 
                 # Clear pending orders at start of each cycle
                 self._pending_order_symbols.clear()
 
-                # Fetch bars and compute signals
-                bars = self._fetch_historical_bars(self.strategy.universe)
                 with db.get_db() as conn:
                     open_trades = db.get_open_trades(conn)
                 open_syms = [t["symbol"] for t in open_trades]
-                signals = self.strategy.generate_signals(bars, open_symbols=open_syms)
+                all_signals = []
 
-                if signals:
-                    logger.info("Generated %d signals", len(signals))
+                # Equity signals — only during market hours
+                if market_open and not self.circuit_breaker_triggered:
+                    bars = self._fetch_historical_bars(self.strategy.universe)
+                    equity_signals = self.strategy.generate_signals(bars, open_symbols=open_syms)
+                    all_signals.extend(equity_signals)
+
+                # Crypto signals — 24/7
+                if self.crypto_strategy.universe:
+                    crypto_bars = self._fetch_crypto_bars(self.crypto_strategy.universe)
+                    crypto_signals = self.crypto_strategy.generate_signals(crypto_bars, open_symbols=open_syms)
+                    all_signals.extend(crypto_signals)
+
+                if all_signals:
+                    logger.info("Generated %d signals (%s)",
+                                len(all_signals),
+                                "equity+crypto" if market_open else "crypto only")
 
                 # Execute signals
-                for sig in sorted(signals, key=lambda s: s.strength, reverse=True):
+                for sig in sorted(all_signals, key=lambda s: s.strength, reverse=True):
                     self._execute_signal(sig)
 
-                # Check existing positions
+                # Check existing positions (both equity and crypto)
                 self._check_open_positions()
 
                 # Check circuit breaker

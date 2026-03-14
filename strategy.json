@@ -54,5 +54,29 @@
     },
     "timeframe": "5Min",
     "updated_at": null,
-    "sharpe_at_deploy": null
+    "sharpe_at_deploy": null,
+    "crypto": {
+        "parameters": {
+            "rsi_period": 14,
+            "rsi_oversold": 25,
+            "rsi_overbought": 75,
+            "ema_period": 20,
+            "volume_multiplier": 1.0,
+            "volume_lookback": 20,
+            "atr_period": 14,
+            "adx_period": 14,
+            "adx_trending_threshold": 30,
+            "adx_ranging_threshold": 20,
+            "take_profit_atr_mult": 3.0,
+            "time_exit_minutes": 240,
+            "time_exit_max_profit_atr": 0.5,
+            "sentiment_enabled": false,
+            "multi_timeframe_enabled": false,
+            "max_positions_per_sector": 5
+        },
+        "universe": [
+            "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",
+            "DOGE/USD", "LINK/USD", "LTC/USD", "UNI/USD"
+        ]
+    }
 }

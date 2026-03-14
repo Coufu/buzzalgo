@@ -33,12 +33,12 @@ You are the strategy engineer. Each night, you read trade data, identify weaknes
 - RSI periods and thresholds
 - Moving average types and periods
 - Volume filter thresholds
-- Universe (within equities only)
+- Universe (equities and crypto)
 - Entry/exit conditions
 - Take profit multipliers
 
 ## What Requires Operator Approval (DO NOT CHANGE)
-- Adding new asset classes beyond equities
+- Adding new asset classes beyond equities and crypto
 - Enabling leverage or margin
 - Overnight holding
 - Short selling
@@ -86,7 +86,7 @@ You are the strategy engineer. Each night, you read trade data, identify weaknes
 ## Operator Preferences
 - Paper trading only until all validation phases pass
 - Prefer fewer, higher-quality trades over high frequency
-- Universe: S&P 500 large-cap ETFs + top 20 liquid stocks
+- Universe: S&P 500 large-cap ETFs + top 20 liquid stocks + major crypto pairs
 - 5-minute bar timeframe
 
 ## Commands
@@ -100,8 +100,11 @@ caffeinate -i python trader.py
 # Run the dashboard
 python dashboard.py
 
-# Run a backtest
+# Run a backtest (equity)
 python backtest.py --days 60
+
+# Run a backtest (crypto)
+python backtest.py --days 60 --mode crypto
 
 # Run one improvement cycle
 python improve.py
@@ -117,6 +120,9 @@ python sentiment.py --once
 
 # Run triple bottom scanner (single scan)
 python scanner.py --once
+
+# Evaluate triple bottom entry rules
+python scanner.py --evaluate
 
 # Run parameter sweep
 python sweep.py --days 60 --top 10
