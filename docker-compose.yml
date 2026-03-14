@@ -16,8 +16,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 1G
+          cpus: '4.0'
+          memory: 4G
     healthcheck:
       test: ["CMD", "python", "-c", "import os; os.stat('/app/trader.py')"]
       interval: 60s

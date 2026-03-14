@@ -6,9 +6,5 @@ if [ -z "$ALPACA_API_KEY" ] || [ -z "$ALPACA_SECRET_KEY" ]; then
     exit 1
 fi
 
-echo "Running initial 60-day backtest..."
-if ! python -u backtest.py --days 60; then
-    echo "WARNING: Backtest failed (see errors above). Starting trader anyway."
-fi
 echo "Starting trader..."
 exec python -u trader.py
