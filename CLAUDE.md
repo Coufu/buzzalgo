@@ -131,7 +131,7 @@ docker compose up -d --build
 |---------|-----|----------|------|
 | Trader | Docker (`docker compose`) | 24/7 | Executes trades during market hours |
 | Dashboard | Docker (`docker compose`) | 24/7 | FastAPI dashboard on port 8080 |
-| Sentiment | Docker (`docker compose`) | Every 30 min | Scans headlines, classifies via Ollama |
+| Sentiment | launchd (`com.buzzalgo.sentiment`) | 2am daily | Scans headlines, classifies via Ollama deepseek-r1:14b |
 | Caffeinate | launchd (`com.buzzalgo.caffeinate`) | 24/7 | Prevents Mac sleep |
 | Improve | launchd (`com.buzzalgo.improve`) | 2am, 8am, 5pm ET Mon-Fri | Claude Code analyzes + improves strategy |
 | Sweep | launchd (`com.buzzalgo.sweep`) | 2am Sat+Sun | Parameter grid search |
