@@ -115,6 +115,9 @@ python improve.py --report-only
 # Run sentiment scanner (single scan)
 python sentiment.py --once
 
+# Run triple bottom scanner (single scan)
+python scanner.py --once
+
 # Run parameter sweep
 python sweep.py --days 60 --top 10
 
@@ -135,6 +138,7 @@ docker compose up -d --build
 | Caffeinate | launchd (`com.buzzalgo.caffeinate`) | 24/7 | Prevents Mac sleep |
 | Journal | launchd (`com.buzzalgo.journal`) | 4:30pm ET Mon-Fri | Daily trading summary to Slack |
 | Improve | launchd (`com.buzzalgo.improve`) | 2am, 8am, 5pm ET Mon-Fri | Claude Code analyzes + improves strategy |
+| Scanner | launchd (`com.buzzalgo.scanner`) | 4:45pm ET Mon-Fri | Triple bottom pattern detection to Slack |
 | Sweep | launchd (`com.buzzalgo.sweep`) | 2am Sat+Sun | Parameter grid search |
 
 Plist templates are in `launchd/` — `setup.sh` installs them automatically.

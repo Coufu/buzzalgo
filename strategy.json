@@ -41,6 +41,17 @@
         "min_sharpe": 0.3,
         "min_win_rate": 0.35
     },
+    "scanner": {
+        "enabled": true,
+        "lookback_days": 90,
+        "swing_window": 3,
+        "support_tolerance_pct": 1.5,
+        "min_bounce_pct": 2.0,
+        "min_touches": 3,
+        "recency_days": 5,
+        "proximity_pct": 5.0,
+        "dedup_days": 5
+    },
     "timeframe": "5Min",
     "updated_at": null,
     "sharpe_at_deploy": null
