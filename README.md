@@ -1,6 +1,6 @@
 # AlgoTrader Pro
 
-Self-improving algorithmic paper trader. Trades automatically during market hours and uses Claude Code every evening to analyze performance and evolve the strategy.
+Self-improving algorithmic paper trader. Trades equities during market hours and crypto 24/7, using Claude Code to analyze performance and evolve the strategy.
 
 ## Quick Start
 
@@ -24,63 +24,74 @@ ALPACA_SECRET_KEY=your_secret
 ALPACA_BASE_URL=https://paper-api.alpaca.markets
 ```
 
-### 3. Install Python (for the improvement loop)
+### 3. Full setup
+
+```bash
+./setup.sh
+```
+
+This installs Python dependencies, sets up the venv, and loads all launchd services.
+
+Or manually:
 
 ```bash
 brew install python@3.13
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-### 4. Start everything
-
-```bash
 docker compose up -d --build
-cp com.buzzalgo.improve.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.buzzalgo.improve.plist
 ```
 
-That's it. The trader and dashboard run in Docker. The improvement loop runs natively at 5pm ET every weekday (it needs Claude Code CLI access).
-
-### 5. Check on it
+### 4. Check on it
 
 - **Dashboard:** http://localhost:8080
 - **Trader logs:** `docker compose logs -f trader`
 - **Improvement logs:** `tail -f improve.log`
 
-## Stopping
-
-```bash
-docker compose down
-launchctl unload ~/Library/LaunchAgents/com.buzzalgo.improve.plist
-```
-
 ## How It Works
 
-**During market hours (9:30am-4pm ET):**
-- Watches 5-minute price bars for SPY, QQQ, IWM and 20 large-cap stocks
-- Enters trades when RSI + EMA + volume signals align
-- Manages positions with stop-losses, take-profits, and trailing stops
-- Halts trading if daily losses exceed 3%
+### Trading
 
-**Every evening at 5pm ET:**
-- Claude Code analyzes the day's trades
-- Identifies what worked and what didn't
-- Modifies the strategy and runs a backtest
-- Deploys the change only if it improves the Sharpe ratio
-- Commits every change to git with an explanation
+**Equities (9:30am-4pm ET, Mon-Fri):**
+- Watches 5-minute bars for ~100 symbols (S&P 500 ETFs + large-cap stocks)
+- Enters trades when RSI + EMA + volume signals align with ADX regime detection
+- Manages positions with stop-losses, take-profits, and time-based exits
 
-**Safety rules (locked, Claude Code cannot change):**
+**Crypto (24/7):**
+- Watches 5-minute bars for BTC, ETH, SOL, AVAX, DOGE, LINK, LTC, UNI
+- Same signal logic with separately tuned parameters (wider RSI bands, longer time exits)
+- Supports fractional quantities
+
+### Self-Improvement
+
+Claude Code analyzes trade history, forms hypotheses, modifies the strategy, validates via backtest, and deploys only if the Sharpe ratio improves. Every change is committed to git with an explanation.
+
+### Safety Rules (locked, Claude Code cannot change)
+
 - 2% of portfolio per trade
 - 1.5x ATR stop-loss
-- Max 5 positions at a time
+- Max 5 concurrent positions
 - -3% daily loss circuit breaker
-- Paper trading only (no real money)
+- Paper trading only
+
+## Scheduled Services
+
+| Service | Runtime | Schedule | What it does |
+|---------|---------|----------|--------------|
+| Trader | Docker | 24/7 | Executes equity trades during market hours, crypto trades 24/7 |
+| Dashboard | Docker | 24/7 | FastAPI dashboard on port 8080 |
+| Improve | launchd | 2am, 8am, 5pm ET Mon-Fri | Claude Code analyzes + improves strategy |
+| Sentiment | launchd | 2am daily | Scans headlines via Ollama deepseek-r1:14b |
+| Journal | launchd | 4:30pm ET Mon-Fri | Daily trading summary to Slack |
+| Scanner | launchd | 4:45pm ET Mon-Fri | Triple bottom pattern detection to Slack |
+| Sweep | launchd | 2am Sat+Sun | Parameter grid search |
+| Caffeinate | launchd | 24/7 | Prevents Mac sleep |
+
+Plist templates are in `launchd/` — `setup.sh` installs them automatically.
 
 ## Slack Notifications
 
-The system can send trade alerts, daily journals, scanner results, and improvement summaries to Slack.
+The system sends trade alerts, daily journals, scanner results, and improvement summaries to Slack.
 
 ### Setup
 
@@ -93,7 +104,7 @@ The system can send trade alerts, daily journals, scanner results, and improveme
 SLACK_WEBHOOK_URL=<your-webhook-url>
 ```
 
-That's it. Once set, these services will post to Slack automatically:
+Once set, these services post to Slack automatically:
 
 | Service | What it posts |
 |---------|---------------|
@@ -102,31 +113,64 @@ That's it. Once set, these services will post to Slack automatically:
 | Scanner | Triple bottom pattern alerts (4:45pm ET) |
 | Improve | Strategy change results (after each cycle) |
 
-If `SLACK_WEBHOOK_URL` is empty or unset, all services run normally — they just skip the Slack notifications silently.
+If `SLACK_WEBHOOK_URL` is empty or unset, all services run normally — notifications are skipped silently.
 
-## Other Commands
+## Commands
 
 ```bash
 source .venv/bin/activate
 
-python backtest.py              # run a 60-day backtest
-python backtest.py --days 90    # custom window
-python improve.py               # trigger one improvement cycle manually
-python improve.py --report-only # just generate the performance report
-python -m pytest tests/ -v      # run tests
+# Trading
+caffeinate -i python trader.py           # run trader natively (alternative to Docker)
+python dashboard.py                      # run dashboard natively
+
+# Backtesting
+python backtest.py                       # 60-day equity backtest
+python backtest.py --days 90             # custom window
+python backtest.py --mode crypto         # crypto backtest
+
+# Improvement
+python improve.py                        # trigger one improvement cycle
+python improve.py --report-only          # generate performance report only
+python improve.py --journal              # send daily journal to Slack
+
+# Scanning
+python scanner.py --once                 # single triple bottom scan
+python scanner.py --evaluate             # score entry rules from past detections
+python sentiment.py --once               # single sentiment scan
+
+# Parameter optimization
+python sweep.py --days 60 --top 10       # parameter grid search
+
+# Replay
+python replay.py --date 2026-03-12       # replay a specific day
+python replay.py --compare params.json   # compare against proposed params
+```
+
+## Stopping
+
+```bash
+docker compose down
+launchctl unload ~/Library/LaunchAgents/com.buzzalgo.*.plist
 ```
 
 ## File Structure
 
 ```
 CLAUDE.md             # Claude Code's operating instructions
-trader.py             # Trading engine (runs in Docker)
+trader.py             # Trading engine (runs in Docker, equities + crypto)
 strategy.py           # Trading strategy (Claude Code evolves this)
-strategy.json         # Strategy parameters (hot-reloaded)
+strategy.json         # Strategy parameters — equity + crypto (hot-reloaded)
 risk.py               # Risk management (LOCKED - never modified)
-backtest.py           # Backtesting engine
-improve.py            # Nightly improvement loop
-dashboard.py          # Web dashboard
-db.py                 # Database layer
-.env                  # Your Alpaca API keys (not committed)
+backtest.py           # Backtesting engine (supports --mode crypto)
+improve.py            # Self-improvement loop + journal + reports
+scanner.py            # Triple bottom pattern scanner
+sentiment.py          # News sentiment via Ollama
+sweep.py              # Parameter grid search
+replay.py             # Day replay for analysis
+dashboard.py          # FastAPI web dashboard
+db.py                 # SQLite database layer
+launchd/              # macOS launchd plist templates
+data/                 # SQLite databases, scanner state
+.env                  # API keys and webhook URL (not committed)
 ```
