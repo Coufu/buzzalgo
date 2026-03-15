@@ -4,10 +4,10 @@
     "description": "RSI(14) oversold/overbought signals with EMA(20) direction filter, volume confirmation, and ADX regime detection",
     "parameters": {
         "rsi_period": 14,
-        "rsi_oversold": 30,
-        "rsi_overbought": 70,
+        "rsi_oversold": 25,
+        "rsi_overbought": 75,
         "ema_period": 20,
-        "volume_multiplier": 1.0,
+        "volume_multiplier": 1.5,
         "volume_lookback": 20,
         "atr_period": 14,
         "adx_period": 14,
@@ -76,7 +76,10 @@
         },
         "universe": [
             "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",
-            "DOGE/USD", "LINK/USD", "LTC/USD", "UNI/USD"
+            "DOGE/USD", "LINK/USD", "LTC/USD", "UNI/USD",
+            "XRP/USD", "BCH/USD", "DOT/USD", "NEAR/USD",
+            "AAVE/USD", "SHIB/USD", "XLM/USD", "GRT/USD",
+            "SUSHI/USD", "MKR/USD", "BAT/USD", "CRV/USD"
         ]
     }
 }
