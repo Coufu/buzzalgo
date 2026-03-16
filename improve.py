@@ -454,7 +454,7 @@ Before making changes, perform this structured analysis:
 1. ANALYZE: Use the framework above to identify the #1 actionable weakness
 2. HYPOTHESIZE: Form 1-2 specific, testable hypotheses
 3. IMPLEMENT: Make minimal, surgical changes to strategy.py and/or strategy.json
-4. VALIDATE: Run `python backtest.py` and check the result
+4. VALIDATE: Run `python backtest.py --days 30` to validate (use 30 days to keep runtime under 20 minutes)
 5. DEPLOY OR REVERT:
    - If backtest Sharpe improves by >= 0.05 AND max drawdown doesn't increase by > 2%: commit changes
    - Otherwise: revert changes and log the failed hypothesis
@@ -483,10 +483,10 @@ Before making changes, perform this structured analysis:
 
     try:
         result = subprocess.run(
-            ["claude", "--print", "-p", prompt],
+            ["claude", "-p", prompt, "--allowedTools", "Edit,Write,Bash,Read,Glob,Grep"],
             capture_output=True,
             text=True,
-            timeout=600,  # 10 minute timeout
+            timeout=5400,  # 90 minute timeout
             cwd=str(PROJECT_ROOT),
         )
         logger.info("Claude Code output:\n%s", result.stdout[-2000:] if result.stdout else "No output")
@@ -498,8 +498,8 @@ Before making changes, perform this structured analysis:
             # Try to extract structured summary
             slack_msg = _build_improvement_slack_message(output)
     except subprocess.TimeoutExpired:
-        logger.error("Claude Code improvement cycle timed out after 10 minutes")
-        _notify_slack(":warning: *Improvement cycle timed out* after 10 minutes")
+        logger.error("Claude Code improvement cycle timed out after 90 minutes")
+        _notify_slack(":warning: *Improvement cycle timed out* after 90 minutes")
     except FileNotFoundError:
         logger.error("Claude Code CLI not found - make sure 'claude' is in PATH")
         _notify_slack(":x: *Improvement cycle failed* — Claude Code CLI not found in PATH")
