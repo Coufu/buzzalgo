@@ -1,12 +1,12 @@
 {
-    "version": "1.2.0",
-    "name": "Momentum + Mean Reversion Hybrid v1.2",
-    "description": "RSI(14) oversold/overbought signals with EMA(20) direction filter, volume confirmation, and ADX regime detection",
+    "version": "1.3.0",
+    "name": "Momentum + Mean Reversion Hybrid v1.3",
+    "description": "RSI(14) oversold/overbought signals with EMA(10) direction filter, volume confirmation, and ADX regime detection",
     "parameters": {
         "rsi_period": 14,
         "rsi_oversold": 25,
         "rsi_overbought": 75,
-        "ema_period": 20,
+        "ema_period": 10,
         "volume_multiplier": 1.5,
         "volume_lookback": 20,
         "atr_period": 14,
@@ -58,10 +58,10 @@
     "crypto": {
         "parameters": {
             "rsi_period": 14,
-            "rsi_oversold": 25,
-            "rsi_overbought": 75,
+            "rsi_oversold": 35,
+            "rsi_overbought": 65,
             "ema_period": 20,
-            "volume_multiplier": 1.0,
+            "volume_multiplier": 0.0,
             "volume_lookback": 20,
             "atr_period": 14,
             "adx_period": 14,

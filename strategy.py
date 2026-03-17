@@ -1,9 +1,9 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 1.2.0
+Version: 1.3.0
 Name: Momentum + Mean Reversion Hybrid
-Description: RSI(14) oversold/overbought signals with EMA(20)
+Description: RSI(14) oversold/overbought signals with EMA(10)
              direction filter, volume confirmation, ADX regime
              detection, and time-of-day awareness on 5-min bars.
 
@@ -99,7 +99,7 @@ class Signal:
 class Strategy:
     """Baseline momentum + mean-reversion hybrid strategy."""
 
-    VERSION = "1.2.0"
+    VERSION = "1.3.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
