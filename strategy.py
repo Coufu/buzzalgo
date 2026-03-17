@@ -76,9 +76,9 @@ SECTOR_MAP = {
     # Crypto
     "BTC/USD": "Crypto", "ETH/USD": "Crypto", "SOL/USD": "Crypto", "AVAX/USD": "Crypto",
     "DOGE/USD": "Crypto", "LINK/USD": "Crypto", "LTC/USD": "Crypto", "UNI/USD": "Crypto",
-    "XRP/USD": "Crypto", "BCH/USD": "Crypto", "DOT/USD": "Crypto", "NEAR/USD": "Crypto",
-    "AAVE/USD": "Crypto", "SHIB/USD": "Crypto", "XLM/USD": "Crypto", "GRT/USD": "Crypto",
-    "SUSHI/USD": "Crypto", "MKR/USD": "Crypto", "BAT/USD": "Crypto", "CRV/USD": "Crypto",
+    "XRP/USD": "Crypto", "BCH/USD": "Crypto", "DOT/USD": "Crypto",
+    "AAVE/USD": "Crypto", "SHIB/USD": "Crypto", "GRT/USD": "Crypto",
+    "SUSHI/USD": "Crypto", "BAT/USD": "Crypto", "CRV/USD": "Crypto",
 }
 
 

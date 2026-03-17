@@ -77,9 +77,8 @@
         "universe": [
             "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",
             "DOGE/USD", "LINK/USD", "LTC/USD", "UNI/USD",
-            "XRP/USD", "BCH/USD", "DOT/USD", "NEAR/USD",
-            "AAVE/USD", "SHIB/USD", "XLM/USD", "GRT/USD",
-            "SUSHI/USD", "MKR/USD", "BAT/USD", "CRV/USD"
+            "XRP/USD", "BCH/USD", "DOT/USD", "AAVE/USD",
+            "SHIB/USD", "GRT/USD", "SUSHI/USD", "BAT/USD", "CRV/USD"
         ]
     }
 }

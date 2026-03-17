@@ -138,7 +138,7 @@ docker compose up -d --build
 ## Scheduled Services
 | Service | How | Schedule | What |
 |---------|-----|----------|------|
-| Trader | Docker (`docker compose`) | 24/7 | Executes trades during market hours |
+| Trader | Docker (`docker compose`) | 24/7 | Executes equity trades during market hours, crypto 24/7 |
 | Dashboard | Docker (`docker compose`) | 24/7 | FastAPI dashboard on port 8080 |
 | Sentiment | launchd (`com.buzzalgo.sentiment`) | 2am daily | Scans headlines, classifies via Ollama deepseek-r1:14b |
 | Caffeinate | launchd (`com.buzzalgo.caffeinate`) | 24/7 | Prevents Mac sleep |
@@ -146,5 +146,6 @@ docker compose up -d --build
 | Improve | launchd (`com.buzzalgo.improve`) | 2am, 8am, 5pm ET Mon-Fri | Claude Code analyzes + improves strategy |
 | Scanner | launchd (`com.buzzalgo.scanner`) | 4:45pm ET Mon-Fri | Triple bottom pattern detection to Slack |
 | Sweep | launchd (`com.buzzalgo.sweep`) | 2am Sat+Sun | Parameter grid search |
+| Healthcheck | launchd (`com.buzzalgo.healthcheck`) | 9am+6pm ET Mon-Fri, noon Sat+Sun | System health report to Slack |
 
 Plist templates are in `launchd/` — `setup.sh` installs them automatically.
