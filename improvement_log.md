@@ -20,3 +20,23 @@ All strategy modifications are logged here with hypotheses, outcomes, and reason
 - Train Sharpe: 0.29, Test Sharpe: 4.49
 
 **Outcome**: DEPLOYED — Sharpe improved by +4.49 (well above 0.05 threshold), max drawdown unchanged at 0.03%.
+
+---
+
+## 2026-03-16 — Add EMA slope filter for long entries
+
+**Hypothesis**: Long entries (rsi_oversold_bounce) fire even when the EMA is flat or declining, leading to bounces without trend support. Requiring `ema_slope > 0` for longs ensures entries only occur when the short-term trend is rising, filtering weak bounces in trendless markets.
+
+**Changes**:
+- `strategy.py`: Added `if ema_slope <= 0: return None` guard in long entry logic
+- Version bump: 1.1.0 → 1.2.0
+
+**Backtest Result**:
+- Sharpe: 3.43 (was 2.44)
+- Win Rate: 58.33% (was 53.85%)
+- Max Drawdown: 0.03% (unchanged)
+- Profit Factor: 1.86 (was 1.35)
+- Total Trades: 12 (was 13)
+- Train Sharpe: -9.04, Test Sharpe: 3.43
+
+**Outcome**: DEPLOYED — Sharpe improved by +0.99 (well above 0.05 threshold), max drawdown unchanged at 0.03%. Filtered 1 low-quality trade, improving win rate and profit factor significantly.

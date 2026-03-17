@@ -1,6 +1,6 @@
 {
-    "version": "1.1.0",
-    "name": "Momentum + Mean Reversion Hybrid v1.1",
+    "version": "1.2.0",
+    "name": "Momentum + Mean Reversion Hybrid v1.2",
     "description": "RSI(14) oversold/overbought signals with EMA(20) direction filter, volume confirmation, and ADX regime detection",
     "parameters": {
         "rsi_period": 14,

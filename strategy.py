@@ -1,7 +1,7 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 1.1.0
+Version: 1.2.0
 Name: Momentum + Mean Reversion Hybrid
 Description: RSI(14) oversold/overbought signals with EMA(20)
              direction filter, volume confirmation, ADX regime
@@ -99,7 +99,7 @@ class Signal:
 class Strategy:
     """Baseline momentum + mean-reversion hybrid strategy."""
 
-    VERSION = "1.1.0"
+    VERSION = "1.2.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
@@ -327,6 +327,9 @@ class Strategy:
         if prev_rsi <= self.rsi_oversold and rsi > self.rsi_oversold and price > ema:
             # Skip longs in strong downtrend
             if regime == "trending_down" and adx > self.adx_trending:
+                return None
+            # Skip longs when EMA is flat or declining (no trend support)
+            if ema_slope <= 0:
                 return None
             # Multi-timeframe: skip longs if daily trend is down
             if self.multi_timeframe_enabled and daily_trend == "down":
