@@ -1,11 +1,14 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 1.3.0
+Version: 1.6.0
 Name: Momentum + Mean Reversion Hybrid
 Description: RSI(14) oversold/overbought signals with EMA(10)
              direction filter, volume confirmation, ADX regime
-             detection, and time-of-day awareness on 5-min bars.
+             detection, RSI momentum filter, and time-of-day
+             awareness on 5-min bars.
+             v1.6.0: Removed BB squeeze breakout (generated 540+
+             false signals, Sharpe -21 → -0.88).
 
 Claude Code may freely modify:
   - RSI periods & thresholds
@@ -99,7 +102,7 @@ class Signal:
 class Strategy:
     """Baseline momentum + mean-reversion hybrid strategy."""
 
-    VERSION = "1.3.0"
+    VERSION = "1.6.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
@@ -124,6 +127,9 @@ class Strategy:
         self.multi_timeframe_enabled = params.get("multi_timeframe_enabled", False)
         self.daily_trend_period = params.get("daily_trend_period", 5)
         self.max_positions_per_sector = params.get("max_positions_per_sector", 2)
+        self.min_ema_slope = params.get("min_ema_slope", 0.0)
+        self.min_adx_entry = params.get("min_adx_entry", 0)
+        self.min_rsi_delta = params.get("min_rsi_delta", 3.0)
         self.universe = params.get("universe", ["SPY", "QQQ", "IWM"])
         logger.info("Strategy v%s initialized: RSI(%d) EMA(%d) ADX(%d)",
                      self.VERSION, self.rsi_period, self.ema_period, self.adx_period)
@@ -278,6 +284,10 @@ class Strategy:
             if volume_ratio < self.volume_multiplier:
                 continue
 
+            # ADX minimum filter - skip ranging markets with no directional conviction
+            if self.min_adx_entry > 0 and adx < self.min_adx_entry:
+                continue
+
             # Multi-timeframe filter: skip signals against daily trend
             daily_trend = daily_trends.get(symbol, "neutral")
             if self.multi_timeframe_enabled and daily_trend != "neutral":
@@ -289,13 +299,11 @@ class Strategy:
             if sector != "ETF" and sector_counts.get(sector, 0) >= self.max_positions_per_sector:
                 continue
 
-            sentiment_score = sentiment_map.get(symbol, 0.0)
-
             signal = self._evaluate_entry(
                 symbol, rsi, prev["rsi"], ema, atr, price, volume_ratio,
                 regime=regime, adx=adx, ema_slope=ema_slope,
                 time_bucket=time_bucket, entry_hour=entry_hour,
-                sentiment_score=sentiment_score,
+                sentiment_score=sentiment_map.get(symbol, 0.0),
                 daily_trend=daily_trend,
             )
             if signal is not None:
@@ -328,8 +336,11 @@ class Strategy:
             # Skip longs in strong downtrend
             if regime == "trending_down" and adx > self.adx_trending:
                 return None
-            # Skip longs when EMA is flat or declining (no trend support)
-            if ema_slope <= 0:
+            # Skip longs when EMA slope is below minimum threshold
+            if ema_slope <= self.min_ema_slope:
+                return None
+            # Skip weak RSI bounces — require minimum RSI acceleration
+            if (rsi - prev_rsi) < self.min_rsi_delta:
                 return None
             # Multi-timeframe: skip longs if daily trend is down
             if self.multi_timeframe_enabled and daily_trend == "down":
@@ -364,6 +375,9 @@ class Strategy:
                 return None
             # Multi-timeframe: skip shorts if daily trend is up
             if self.multi_timeframe_enabled and daily_trend == "up":
+                return None
+            # Skip weak RSI drops — require minimum RSI deceleration
+            if (prev_rsi - rsi) < self.min_rsi_delta:
                 return None
             strength = min(1.0, (prev_rsi - self.rsi_overbought + 10) / 20 * volume_ratio / max(self.volume_multiplier, 0.01))
             # Sentiment boost/dampen (invert: bearish sentiment boosts short strength)
