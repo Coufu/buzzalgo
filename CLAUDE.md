@@ -37,6 +37,11 @@ You are the strategy engineer. Each night, you read trade data, identify weaknes
 - Entry/exit conditions
 - Take profit multipliers
 
+## Improvement Rules
+- **Do NOT remove signal types.** You may tune parameters, add filters, or add new signal types, but never delete an existing signal type from strategy.py. If a signal type performs poorly, disable it via a parameter (e.g. set its threshold to an unreachable value) rather than removing the code.
+- **Do NOT add more than 3 new filters per improvement cycle.** Over-filtering leads to zero trades.
+- **Use `--days 30` for backtests** during improvement cycles to keep runtime under 20 minutes.
+
 ## What Requires Operator Approval (DO NOT CHANGE)
 - Adding new asset classes beyond equities and crypto
 - Enabling leverage or margin

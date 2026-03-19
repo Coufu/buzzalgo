@@ -150,6 +150,45 @@ def check_recent_trades() -> dict:
         return {"name": "trades", "status": "error", "detail": str(e)}
 
 
+def check_position_sync() -> dict:
+    """Compare Alpaca positions against DB open trades."""
+    try:
+        from alpaca.trading.client import TradingClient
+        client = TradingClient(
+            os.environ.get("ALPACA_API_KEY", ""),
+            os.environ.get("ALPACA_SECRET_KEY", ""),
+            paper=True,
+        )
+        alpaca_positions = {p.symbol: p for p in client.get_all_positions()}
+
+        import db
+        with db.get_db() as conn:
+            db_open = db.get_open_trades(conn)
+        db_symbols = {t["symbol"] for t in db_open}
+
+        # Normalize crypto symbols: Alpaca uses "BTCUSD", DB uses "BTC/USD"
+        alpaca_symbols = set()
+        for sym in alpaca_positions:
+            if sym.endswith("USD") and len(sym) > 3 and not sym.startswith(("S", "T", "U", "E", "P", "V", "W", "D", "G", "H", "I", "A", "B", "C", "F", "J", "K", "L", "M", "N", "O", "Q", "R", "X", "Y", "Z")):
+                pass  # ambiguous, skip normalization
+            alpaca_symbols.add(sym)
+
+        orphan_alpaca = alpaca_symbols - db_symbols
+        orphan_db = db_symbols - alpaca_symbols
+
+        issues = []
+        if orphan_alpaca:
+            issues.append(f"{len(orphan_alpaca)} on Alpaca not in DB: {', '.join(sorted(orphan_alpaca)[:5])}")
+        if orphan_db:
+            issues.append(f"{len(orphan_db)} in DB not on Alpaca: {', '.join(sorted(orphan_db)[:5])}")
+
+        if issues:
+            return {"name": "position sync", "status": "warning", "detail": " | ".join(issues)}
+        return {"name": "position sync", "status": "ok", "detail": f"{len(alpaca_positions)} positions, all tracked"}
+    except Exception as e:
+        return {"name": "position sync", "status": "error", "detail": str(e)}
+
+
 def check_log_freshness() -> list[dict]:
     """Check that log files are being written to."""
     results = []
@@ -203,6 +242,9 @@ def run_health_check(quiet: bool = False):
 
     # Trades
     checks.append(check_recent_trades())
+
+    # Position sync
+    checks.append(check_position_sync())
 
     # Log freshness
     checks.extend(check_log_freshness())

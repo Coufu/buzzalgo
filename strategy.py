@@ -1,22 +1,27 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 1.6.0
-Name: Momentum + Mean Reversion Hybrid
-Description: RSI(14) oversold/overbought signals with EMA(10)
-             direction filter, volume confirmation, ADX regime
-             detection, RSI momentum filter, and time-of-day
-             awareness on 5-min bars.
-             v1.6.0: Removed BB squeeze breakout (generated 540+
-             false signals, Sharpe -21 → -0.88).
+Version: 2.0.0
+Name: MACD Crossover Momentum
+Description: MACD crossover signals with RSI momentum confirmation,
+             EMA trend filter, volume confirmation, ADX regime
+             detection, and midday-only time filter on 5-min bars.
+             v2.0.0: MAJOR PIVOT — replaced RSI mean-reversion with
+             MACD crossover momentum. Kill criteria triggered on v1.6.0
+             (Sharpe -1.05, 2% win rate after 148 trades).
+             Donchian breakout also tested and failed (Sharpe -15.9).
+             MACD crossover captures directional momentum shifts
+             while midday filter restricts to the only profitable
+             time window observed in performance data.
 
 Claude Code may freely modify:
-  - RSI periods & thresholds
+  - MACD parameters (fast, slow, signal periods)
+  - RSI periods & thresholds (used as filter, not trigger)
   - Moving average types/periods
   - Volume filter thresholds
   - Universe (within equities)
   - Entry/exit conditions
-  - Take profit multipliers
+  - Time-of-day filter windows
   - ADX thresholds for regime detection
 
 Claude Code may NOT modify:
@@ -89,7 +94,7 @@ SECTOR_MAP = {
 class Signal:
     symbol: str
     side: str          # "long" or "short"
-    signal_type: str   # e.g., "rsi_oversold_bounce", "rsi_overbought_short"
+    signal_type: str   # e.g., "macd_crossover_long", "macd_crossover_short"
     strength: float    # 0.0 to 1.0
     rsi: float
     ema: float
@@ -100,39 +105,61 @@ class Signal:
 
 
 class Strategy:
-    """Baseline momentum + mean-reversion hybrid strategy."""
+    """MACD crossover momentum strategy with midday time filter."""
 
-    VERSION = "1.6.0"
+    VERSION = "2.0.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
         if params is None:
             params = self._load_params(mode)
+        # MACD parameters
+        self.macd_fast = params.get("macd_fast", 12)
+        self.macd_slow = params.get("macd_slow", 26)
+        self.macd_signal = params.get("macd_signal", 9)
+        # RSI as momentum filter (not trigger)
         self.rsi_period = params.get("rsi_period", 14)
-        self.rsi_oversold = params.get("rsi_oversold", 30)
-        self.rsi_overbought = params.get("rsi_overbought", 70)
-        self.ema_period = params.get("ema_period", 20)
+        self.rsi_long_min = params.get("rsi_long_min", 50)
+        self.rsi_short_max = params.get("rsi_short_max", 50)
+        # EMA trend filter
+        self.ema_period = params.get("ema_period", 10)
+        # Volume filter
         self.volume_multiplier = params.get("volume_multiplier", 1.5)
         self.volume_lookback = params.get("volume_lookback", 20)
+        # ATR
         self.atr_period = params.get("atr_period", 14)
+        # ADX regime detection
         self.adx_period = params.get("adx_period", 14)
         self.adx_trending = params.get("adx_trending_threshold", 25)
         self.adx_ranging = params.get("adx_ranging_threshold", 20)
+        self.min_adx_entry = params.get("min_adx_entry", 20)
+        # Minimum MACD histogram magnitude (as fraction of ATR) to filter weak crossovers
+        self.min_macd_atr_ratio = params.get("min_macd_atr_ratio", 0.0)
+        # Time-based exit
         self.time_exit_minutes = params.get("time_exit_minutes", 120)
         self.time_exit_max_profit_atr = params.get("time_exit_max_profit_atr", 0.5)
+        # Time-of-day filter: only trade during these hours (ET)
+        self.trade_start_hour = params.get("trade_start_hour", 10)
+        self.trade_end_hour = params.get("trade_end_hour", 14)
+        # Sentiment
         self.sentiment_enabled = params.get("sentiment_enabled", False)
         self.sentiment_weight = params.get("sentiment_weight", 0.3)
         self.sentiment_veto_threshold = params.get("sentiment_veto_threshold", 0.5)
         self.sentiment_lookback_hours = params.get("sentiment_lookback_hours", 4)
+        # Multi-timeframe
         self.multi_timeframe_enabled = params.get("multi_timeframe_enabled", False)
         self.daily_trend_period = params.get("daily_trend_period", 5)
+        # Sector filter
         self.max_positions_per_sector = params.get("max_positions_per_sector", 2)
-        self.min_ema_slope = params.get("min_ema_slope", 0.0)
-        self.min_adx_entry = params.get("min_adx_entry", 0)
-        self.min_rsi_delta = params.get("min_rsi_delta", 3.0)
+        # Universe
         self.universe = params.get("universe", ["SPY", "QQQ", "IWM"])
-        logger.info("Strategy v%s initialized: RSI(%d) EMA(%d) ADX(%d)",
-                     self.VERSION, self.rsi_period, self.ema_period, self.adx_period)
+        # Legacy params for compatibility (used by backtest/risk)
+        self.rsi_oversold = params.get("rsi_oversold", 25)
+        self.rsi_overbought = params.get("rsi_overbought", 75)
+        logger.info("Strategy v%s initialized: MACD(%d,%d,%d) RSI(%d) EMA(%d) ADX(%d) hours=%d-%d",
+                     self.VERSION, self.macd_fast, self.macd_slow, self.macd_signal,
+                     self.rsi_period, self.ema_period, self.adx_period,
+                     self.trade_start_hour, self.trade_end_hour)
 
     @staticmethod
     def _load_params(mode: str = "equity") -> dict:
@@ -152,16 +179,26 @@ class Strategy:
         logger.info("Strategy parameters hot-reloaded")
 
     def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add RSI, EMA, ATR, ADX, and volume ratio columns to a DataFrame of bars.
-
-        Expects columns: open, high, low, close, volume.
-        """
+        """Add MACD, RSI, EMA, ATR, ADX, and volume ratio columns."""
         df = df.copy()
         df["rsi"] = ta.rsi(df["close"], length=self.rsi_period)
         df["ema"] = ta.ema(df["close"], length=self.ema_period)
         df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=self.atr_period)
         df["vol_avg"] = df["volume"].rolling(window=self.volume_lookback).mean()
         df["volume_ratio"] = df["volume"] / df["vol_avg"]
+        # MACD
+        macd_df = ta.macd(df["close"], fast=self.macd_fast, slow=self.macd_slow, signal=self.macd_signal)
+        if macd_df is not None:
+            macd_col = f"MACD_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}"
+            signal_col = f"MACDs_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}"
+            hist_col = f"MACDh_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}"
+            df["macd"] = macd_df[macd_col] if macd_col in macd_df.columns else np.nan
+            df["macd_signal"] = macd_df[signal_col] if signal_col in macd_df.columns else np.nan
+            df["macd_hist"] = macd_df[hist_col] if hist_col in macd_df.columns else np.nan
+        else:
+            df["macd"] = np.nan
+            df["macd_signal"] = np.nan
+            df["macd_hist"] = np.nan
         # Regime detection
         try:
             adx_df = ta.adx(df["high"], df["low"], df["close"], length=self.adx_period)
@@ -169,8 +206,6 @@ class Strategy:
             if adx_df is not None and adx_col in adx_df.columns:
                 df["adx"] = adx_df[adx_col]
             else:
-                logger.warning("ADX calculation returned unexpected columns: %s",
-                               list(adx_df.columns) if adx_df is not None else "None")
                 df["adx"] = np.nan
         except Exception as e:
             logger.warning("ADX calculation failed: %s", e)
@@ -221,16 +256,14 @@ class Strategy:
             pass
         return "neutral"
 
+    def _is_trading_hour(self, ts) -> bool:
+        """Check if timestamp falls within allowed trading hours (ET)."""
+        if hasattr(ts, "hour"):
+            return self.trade_start_hour <= ts.hour < self.trade_end_hour
+        return False
+
     def generate_signals(self, bars: dict[str, pd.DataFrame], open_symbols: list[str] | None = None) -> list[Signal]:
-        """Generate trading signals for all symbols.
-
-        Args:
-            bars: Dict mapping symbol -> DataFrame of OHLCV bars.
-                  Each DataFrame must have at least `ema_period + rsi_period` rows.
-
-        Returns:
-            List of Signal objects for actionable setups.
-        """
+        """Generate trading signals for all symbols."""
         # Load sentiment scores if enabled
         sentiment_map: dict[str, float] = {}
         if self.sentiment_enabled:
@@ -239,7 +272,7 @@ class Strategy:
                 with _db.get_db() as conn:
                     sentiment_map = _db.get_aggregate_sentiment(conn, self.sentiment_lookback_hours)
             except Exception:
-                pass  # No sentiment data is fine — defaults to neutral
+                pass
 
         # Compute daily trends for multi-timeframe filter
         daily_trends: dict[str, str] = {}
@@ -258,7 +291,8 @@ class Strategy:
         for symbol, df in bars.items():
             if symbol not in self.universe:
                 continue
-            if len(df) < max(self.rsi_period, self.ema_period, self.volume_lookback) + 5:
+            min_bars = max(self.rsi_period, self.ema_period, self.volume_lookback) + 5
+            if len(df) < min_bars:
                 continue
 
             df = self.compute_indicators(df)
@@ -266,6 +300,14 @@ class Strategy:
             prev = df.iloc[-2]
 
             if pd.isna(latest["rsi"]) or pd.isna(latest["ema"]) or pd.isna(latest["atr"]):
+                continue
+            if pd.isna(latest["macd"]) or pd.isna(latest["macd_signal"]):
+                continue
+            if pd.isna(prev["macd"]) or pd.isna(prev["macd_signal"]):
+                continue
+
+            # Time-of-day filter: only trade during midday window
+            if not self._is_trading_hour(df.index[-1]):
                 continue
 
             rsi = latest["rsi"]
@@ -275,32 +317,34 @@ class Strategy:
             volume_ratio = latest["volume_ratio"] if not pd.isna(latest["volume_ratio"]) else 0
             adx = latest["adx"] if not pd.isna(latest.get("adx")) else 0
             ema_slope = latest["ema_slope"] if not pd.isna(latest.get("ema_slope")) else 0
+            macd = latest["macd"]
+            macd_sig = latest["macd_signal"]
+            macd_hist = latest["macd_hist"] if not pd.isna(latest.get("macd_hist")) else 0
+            prev_macd = prev["macd"]
+            prev_macd_sig = prev["macd_signal"]
 
             regime = self._classify_regime(adx, ema_slope)
             time_bucket = self._classify_time_bucket(df.index[-1])
             entry_hour = df.index[-1].hour if hasattr(df.index[-1], "hour") else None
 
-            # Volume filter - skip low-volume bars
+            # Volume filter
             if volume_ratio < self.volume_multiplier:
                 continue
 
-            # ADX minimum filter - skip ranging markets with no directional conviction
+            # ADX minimum filter
             if self.min_adx_entry > 0 and adx < self.min_adx_entry:
                 continue
-
-            # Multi-timeframe filter: skip signals against daily trend
-            daily_trend = daily_trends.get(symbol, "neutral")
-            if self.multi_timeframe_enabled and daily_trend != "neutral":
-                # We'll pass daily_trend to _evaluate_entry for filtering
-                pass
 
             # Sector correlation filter
             sector = SECTOR_MAP.get(symbol, "Other")
             if sector != "ETF" and sector_counts.get(sector, 0) >= self.max_positions_per_sector:
                 continue
 
+            daily_trend = daily_trends.get(symbol, "neutral")
+
             signal = self._evaluate_entry(
-                symbol, rsi, prev["rsi"], ema, atr, price, volume_ratio,
+                symbol, rsi, price, ema, atr, volume_ratio,
+                macd, macd_sig, prev_macd, prev_macd_sig, macd_hist,
                 regime=regime, adx=adx, ema_slope=ema_slope,
                 time_bucket=time_bucket, entry_hour=entry_hour,
                 sentiment_score=sentiment_map.get(symbol, 0.0),
@@ -312,14 +356,15 @@ class Strategy:
         return signals
 
     def _evaluate_entry(
-        self, symbol: str, rsi: float, prev_rsi: float,
-        ema: float, atr: float, price: float, volume_ratio: float,
+        self, symbol: str, rsi: float, price: float,
+        ema: float, atr: float, volume_ratio: float,
+        macd: float, macd_sig: float,
+        prev_macd: float, prev_macd_sig: float, macd_hist: float,
         *, regime: str = "", adx: float = 0, ema_slope: float = 0,
         time_bucket: str = "", entry_hour: int | None = None,
-        sentiment_score: float = 0.0,
-        daily_trend: str = "neutral",
+        sentiment_score: float = 0.0, daily_trend: str = "neutral",
     ) -> Signal | None:
-        """Evaluate whether current conditions warrant an entry signal."""
+        """Evaluate MACD crossover entry conditions."""
 
         extra_context = {
             "market_regime": regime,
@@ -331,29 +376,31 @@ class Strategy:
             "daily_trend": daily_trend,
         }
 
-        # Long signal: RSI crosses above oversold + price above EMA (momentum confirmation)
-        if prev_rsi <= self.rsi_oversold and rsi > self.rsi_oversold and price > ema:
+        # Minimum MACD histogram magnitude filter (avoid weak crossovers)
+        if self.min_macd_atr_ratio > 0 and atr > 0:
+            if abs(macd_hist) < atr * self.min_macd_atr_ratio:
+                return None
+
+        # Bullish MACD crossover: MACD crosses above signal line
+        # Confirmed by: RSI > 50 (momentum), price > EMA (trend)
+        if prev_macd <= prev_macd_sig and macd > macd_sig and price > ema and rsi >= self.rsi_long_min:
             # Skip longs in strong downtrend
             if regime == "trending_down" and adx > self.adx_trending:
-                return None
-            # Skip longs when EMA slope is below minimum threshold
-            if ema_slope <= self.min_ema_slope:
-                return None
-            # Skip weak RSI bounces — require minimum RSI acceleration
-            if (rsi - prev_rsi) < self.min_rsi_delta:
                 return None
             # Multi-timeframe: skip longs if daily trend is down
             if self.multi_timeframe_enabled and daily_trend == "down":
                 return None
-            strength = min(1.0, (self.rsi_oversold - prev_rsi + 10) / 20 * volume_ratio / max(self.volume_multiplier, 0.01))
-            # Sentiment boost/dampen signal strength
+            # Strength based on MACD histogram magnitude + volume
+            hist_strength = min(1.0, abs(macd_hist) / atr * 2) if atr > 0 else 0.5
+            strength = min(1.0, hist_strength * volume_ratio / max(self.volume_multiplier, 0.01))
+            strength = max(0.01, strength)
             if self.sentiment_enabled and sentiment_score != 0:
                 strength *= (1.0 + sentiment_score * self.sentiment_weight)
                 strength = max(0.01, min(1.0, strength))
             return Signal(
                 symbol=symbol,
                 side="long",
-                signal_type="rsi_oversold_bounce",
+                signal_type="macd_crossover_long",
                 strength=strength,
                 rsi=rsi,
                 ema=ema,
@@ -361,33 +408,33 @@ class Strategy:
                 volume_ratio=volume_ratio,
                 price=price,
                 context={
-                    "prev_rsi": prev_rsi,
+                    "macd": round(macd, 6),
+                    "macd_signal": round(macd_sig, 6),
+                    "macd_hist": round(macd_hist, 6),
                     "price_above_ema": True,
-                    "ema_distance_pct": round((price - ema) / ema * 100, 3),
                     **extra_context,
                 },
             )
 
-        # Short signal: RSI crosses below overbought + price below EMA
-        if prev_rsi >= self.rsi_overbought and rsi < self.rsi_overbought and price < ema:
+        # Bearish MACD crossover: MACD crosses below signal line
+        # Confirmed by: RSI < 50, price < EMA
+        if prev_macd >= prev_macd_sig and macd < macd_sig and price < ema and rsi <= self.rsi_short_max:
             # Skip shorts in strong uptrend
             if regime == "trending_up" and adx > self.adx_trending:
                 return None
             # Multi-timeframe: skip shorts if daily trend is up
             if self.multi_timeframe_enabled and daily_trend == "up":
                 return None
-            # Skip weak RSI drops — require minimum RSI deceleration
-            if (prev_rsi - rsi) < self.min_rsi_delta:
-                return None
-            strength = min(1.0, (prev_rsi - self.rsi_overbought + 10) / 20 * volume_ratio / max(self.volume_multiplier, 0.01))
-            # Sentiment boost/dampen (invert: bearish sentiment boosts short strength)
+            hist_strength = min(1.0, abs(macd_hist) / atr * 2) if atr > 0 else 0.5
+            strength = min(1.0, hist_strength * volume_ratio / max(self.volume_multiplier, 0.01))
+            strength = max(0.01, strength)
             if self.sentiment_enabled and sentiment_score != 0:
                 strength *= (1.0 - sentiment_score * self.sentiment_weight)
                 strength = max(0.01, min(1.0, strength))
             return Signal(
                 symbol=symbol,
                 side="short",
-                signal_type="rsi_overbought_short",
+                signal_type="macd_crossover_short",
                 strength=strength,
                 rsi=rsi,
                 ema=ema,
@@ -395,9 +442,10 @@ class Strategy:
                 volume_ratio=volume_ratio,
                 price=price,
                 context={
-                    "prev_rsi": prev_rsi,
+                    "macd": round(macd, 6),
+                    "macd_signal": round(macd_sig, 6),
+                    "macd_hist": round(macd_hist, 6),
                     "price_below_ema": True,
-                    "ema_distance_pct": round((price - ema) / ema * 100, 3),
                     **extra_context,
                 },
             )
@@ -409,14 +457,6 @@ class Strategy:
 
         Note: Stop-loss and take-profit exits are handled by risk.py.
         This method handles strategy-specific exit logic only.
-
-        Args:
-            trade: Trade dict from the database.
-            current_price: Current market price.
-            current_atr: Current ATR value.
-
-        Returns:
-            (should_exit, reason) tuple.
         """
         entry_price = trade["entry_price"]
         side = trade["side"]
@@ -439,10 +479,5 @@ class Strategy:
                     return True, "time_exit_flat"
             except (ValueError, TypeError):
                 pass
-
-        # Note: trailing stop logic is handled by the backtest simulate() and
-        # trader via stop_price/take_profit_price from risk.py. The should_exit()
-        # method cannot implement a true trailing stop because it has no memory
-        # of the peak price between calls.
 
         return False, ""

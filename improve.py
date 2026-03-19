@@ -486,7 +486,7 @@ Before making changes, perform this structured analysis:
             ["claude", "-p", prompt, "--allowedTools", "Edit,Write,Bash,Read,Glob,Grep"],
             capture_output=True,
             text=True,
-            timeout=5400,  # 90 minute timeout
+            timeout=7200,  # 120 minute timeout
             cwd=str(PROJECT_ROOT),
         )
         logger.info("Claude Code output:\n%s", result.stdout[-2000:] if result.stdout else "No output")
@@ -498,7 +498,7 @@ Before making changes, perform this structured analysis:
             # Try to extract structured summary
             slack_msg = _build_improvement_slack_message(output)
     except subprocess.TimeoutExpired:
-        logger.error("Claude Code improvement cycle timed out after 90 minutes")
+        logger.error("Claude Code improvement cycle timed out after 120 minutes")
         _notify_slack(":warning: *Improvement cycle timed out* after 90 minutes")
     except FileNotFoundError:
         logger.error("Claude Code CLI not found - make sure 'claude' is in PATH")
