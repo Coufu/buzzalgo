@@ -102,7 +102,36 @@ class Trader:
         self._pending_order_symbols: set[str] = set()
 
         db.init_db()
+        self._reconcile_positions()
         logger.info("Trader initialized - paper trading mode")
+
+    def _reconcile_positions(self):
+        """On startup, close any Alpaca positions not tracked in the DB."""
+        try:
+            alpaca_positions = {p.symbol: p for p in self.trading_client.get_all_positions()}
+            with db.get_db() as conn:
+                db_open = db.get_open_trades(conn)
+            db_symbols = {t["symbol"] for t in db_open}
+
+            orphans = set(alpaca_positions.keys()) - db_symbols
+            if not orphans:
+                logger.info("Position reconciliation: all %d positions tracked", len(alpaca_positions))
+                return
+
+            logger.warning("Found %d orphan positions on Alpaca, closing: %s", len(orphans), orphans)
+            for sym in orphans:
+                try:
+                    self.trading_client.close_position(sym)
+                    logger.info("Closed orphan position: %s", sym)
+                except Exception as e:
+                    logger.error("Failed to close orphan %s: %s", sym, e)
+
+            _notify_slack(
+                f":broom: *Startup reconciliation* — closed {len(orphans)} orphan position(s): "
+                f"{', '.join(sorted(orphans)[:10])}"
+            )
+        except Exception as e:
+            logger.error("Position reconciliation failed: %s", e)
 
     def _is_market_hours(self) -> bool:
         now = datetime.now(ET)
