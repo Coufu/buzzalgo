@@ -55,6 +55,8 @@ logging.basicConfig(
 ET = ZoneInfo("America/New_York")
 STRATEGY_JSON = Path(__file__).parent / "strategy.json"
 BAR_HISTORY_WINDOW = 50  # bars to fetch for indicator computation
+BAR_TIMEFRAME = "15min"  # resample to 15-min bars for wider ATR/stops
+MAX_TRADES_PER_DAY = 5   # cap daily trades to avoid overtrading
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 
@@ -100,6 +102,7 @@ class Trader:
         self.last_strategy_reload = 0
         self._daily_summary_logged = False
         self._pending_order_symbols: set[str] = set()
+        self._trades_today = 0
 
         db.init_db()
         self._reconcile_positions()
@@ -149,6 +152,7 @@ class Trader:
             self.circuit_breaker_triggered = False
             self._daily_summary_logged = False
             self._pending_order_symbols.clear()
+            self._trades_today = 0
             self._reconcile_positions()
             self.today = today
             logger.info("New trading day: %s | Equity: $%.2f", today, self.starting_equity)
@@ -170,7 +174,7 @@ class Trader:
     def _fetch_historical_bars(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
         """Fetch recent 5-min bars for equity symbols."""
         end = datetime.now(ET)
-        start = end - timedelta(days=5)  # enough for ~50 5-min bars
+        start = end - timedelta(days=10)  # enough for ~50 15-min bars
 
         request = StockBarsRequest(
             symbol_or_symbols=symbols,
@@ -207,7 +211,7 @@ class Trader:
         return result
 
     def _parse_barset(self, barset, symbols: list[str]) -> dict[str, pd.DataFrame]:
-        """Parse an Alpaca barset response into 5-min DataFrames."""
+        """Parse an Alpaca barset response into DataFrames at BAR_TIMEFRAME."""
         result = {}
         for symbol in symbols:
             if symbol in barset.data:
@@ -226,14 +230,14 @@ class Trader:
                     df = pd.DataFrame(rows)
                     df["timestamp"] = pd.to_datetime(df["timestamp"])
                     df = df.set_index("timestamp")
-                    df_5min = df.resample("5min").agg({
+                    resampled = df.resample(BAR_TIMEFRAME).agg({
                         "open": "first",
                         "high": "max",
                         "low": "min",
                         "close": "last",
                         "volume": "sum",
                     }).dropna()
-                    result[symbol] = df_5min.tail(BAR_HISTORY_WINDOW)
+                    result[symbol] = resampled.tail(BAR_HISTORY_WINDOW)
         return result
 
     def _get_unrealized_pnl(self) -> float:
@@ -247,6 +251,11 @@ class Trader:
 
     def _execute_signal(self, sig: Signal):
         """Execute a trade based on a signal."""
+        # Daily trade cap
+        if self._trades_today >= MAX_TRADES_PER_DAY:
+            logger.debug("Daily trade cap reached (%d), skipping %s", MAX_TRADES_PER_DAY, sig.symbol)
+            return
+
         # Dedup: skip if we already submitted an order for this symbol this cycle
         if sig.symbol in self._pending_order_symbols:
             logger.info("Order already pending for %s, skipping", sig.symbol)
@@ -319,6 +328,7 @@ class Trader:
             )
             order = self.trading_client.submit_order(order_request)
             self._pending_order_symbols.add(sig.symbol)
+            self._trades_today += 1
             logger.info(
                 "ORDER SUBMITTED: %s %s %s @ ~$%.2f | stop=$%.2f target=$%.2f",
                 sig.side.upper(), qty, sig.symbol, sig.price,
@@ -571,7 +581,7 @@ class Trader:
 
                 # Wait for next bar interval (5 minutes), but allow fast shutdown
                 try:
-                    await asyncio.wait_for(shutdown_event.wait(), timeout=300)
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=900)  # 15 min
                     break  # shutdown requested
                 except asyncio.TimeoutError:
                     pass

@@ -109,7 +109,7 @@ class Signal:
 class Strategy:
     """Keltner channel breakout strategy, long-only, afternoon session."""
 
-    VERSION = "3.0.0"
+    VERSION = "3.1.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
@@ -220,6 +220,9 @@ class Strategy:
         df["ema_slope"] = (df["ema"] - df["ema"].shift(5)) / df["ema"].shift(5) * 100
         # Keltner channel upper band
         df["keltner_upper"] = df["ema"] + self.keltner_mult * df["atr"]
+        # Donchian channel for liquidity grab detection (previous bar's levels)
+        df["dc_high"] = df["high"].rolling(window=20).max().shift(1)
+        df["dc_low"] = df["low"].rolling(window=20).min().shift(1)
         return df
 
     def _classify_regime(self, adx: float, ema_slope: float) -> str:
@@ -379,8 +382,23 @@ class Strategy:
                     daily_trend=daily_trend, extra_context=extra_context,
                 )
 
+            # Liquidity grab reversal — fade false breakouts
+            if signal is None:
+                dc_high = latest["dc_high"] if not pd.isna(latest.get("dc_high")) else None
+                dc_low = latest["dc_low"] if not pd.isna(latest.get("dc_low")) else None
+                signal = self._evaluate_liquidity_grab(
+                    symbol, rsi, price, ema, atr, volume_ratio,
+                    dc_high, dc_low,
+                    prev_high=prev["high"], prev_low=prev["low"], prev_close=prev["close"],
+                    extra_context=extra_context,
+                )
+
             if signal is not None:
                 signals.append(signal)
+
+        # Cap signals per cycle
+        if len(signals) > 3:
+            signals = sorted(signals, key=lambda s: s.strength, reverse=True)[:3]
 
         return signals
 
@@ -437,6 +455,62 @@ class Strategy:
                 **(extra_context or {}),
             },
         )
+
+    def _evaluate_liquidity_grab(
+        self, symbol: str, rsi: float, price: float,
+        ema: float, atr: float, volume_ratio: float,
+        dc_high: float | None, dc_low: float | None,
+        *, prev_high: float, prev_low: float, prev_close: float,
+        extra_context: dict | None = None,
+    ) -> Signal | None:
+        """Liquidity grab reversal: fade false breakouts.
+
+        Detects when price swept beyond a Donchian level (stop hunt) on the
+        previous bar but closed back inside the range — then enter the reversal.
+
+        Long: prev bar swept below dc_low (grabbed liquidity) but closed above it,
+              current bar confirms by closing above prev close. RSI 30-50 (oversold bounce).
+        Short: prev bar swept above dc_high but closed below it,
+               current bar confirms by closing below prev close. RSI 50-70.
+        """
+        if dc_high is None or dc_low is None or atr <= 0:
+            return None
+
+        ctx = extra_context or {}
+
+        # Long: liquidity grab below support
+        swept_low = prev_low < dc_low  # wick below the channel
+        closed_inside_low = prev_close > dc_low  # but closed back inside
+        confirms_up = price > prev_close  # current bar moving up
+        if swept_low and closed_inside_low and confirms_up and 25 <= rsi <= 55:
+            if self.long_only or not self.long_only:  # works in both modes
+                sweep_depth = (dc_low - prev_low) / atr  # how far it swept
+                strength = min(1.0, sweep_depth * 0.5 + volume_ratio * 0.2)
+                strength = max(0.1, strength)
+                return Signal(
+                    symbol=symbol, side="long", signal_type="liquidity_grab_long",
+                    strength=strength, rsi=rsi, ema=ema, atr=atr,
+                    volume_ratio=volume_ratio, price=price,
+                    context={"dc_low": round(dc_low, 4), "sweep_depth_atr": round(sweep_depth, 3), **ctx},
+                )
+
+        # Short: liquidity grab above resistance (skip if long_only)
+        if not self.long_only:
+            swept_high = prev_high > dc_high
+            closed_inside_high = prev_close < dc_high
+            confirms_down = price < prev_close
+            if swept_high and closed_inside_high and confirms_down and 45 <= rsi <= 75:
+                sweep_depth = (prev_high - dc_high) / atr
+                strength = min(1.0, sweep_depth * 0.5 + volume_ratio * 0.2)
+                strength = max(0.1, strength)
+                return Signal(
+                    symbol=symbol, side="short", signal_type="liquidity_grab_short",
+                    strength=strength, rsi=rsi, ema=ema, atr=atr,
+                    volume_ratio=volume_ratio, price=price,
+                    context={"dc_high": round(dc_high, 4), "sweep_depth_atr": round(sweep_depth, 3), **ctx},
+                )
+
+        return None
 
     def _evaluate_entry(
         self, symbol: str, rsi: float, price: float,
