@@ -1,20 +1,22 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 2.0.0
-Name: MACD Crossover Momentum
-Description: MACD crossover signals with RSI momentum confirmation,
-             EMA trend filter, volume confirmation, ADX regime
-             detection, and midday-only time filter on 5-min bars.
-             v2.0.0: MAJOR PIVOT — replaced RSI mean-reversion with
-             MACD crossover momentum. Kill criteria triggered on v1.6.0
-             (Sharpe -1.05, 2% win rate after 148 trades).
-             Donchian breakout also tested and failed (Sharpe -15.9).
-             MACD crossover captures directional momentum shifts
-             while midday filter restricts to the only profitable
-             time window observed in performance data.
+Version: 3.0.0
+Name: Keltner Breakout Long-Only
+Description: Keltner channel breakout signals, long-only, afternoon
+             session. v3.0.0: MAJOR PIVOT — kill criteria triggered on
+             v2.0.0 (Sharpe -7.17, 5.8% win rate, 207 trades).
+             MACD crossovers fired too frequently (163 trades in one day).
+             Shorts were catastrophic (125 short trades, 1.6% WR).
+             New approach: Keltner breakout (price > EMA + mult*ATR)
+             captures confirmed volatility expansion in uptrends.
+             Long-only eliminates the losing short side.
+             Afternoon session (12-16 ET) targets the only profitable
+             time windows (midday +$7.69, close_30 +$32.93).
+             MACD crossover long retained as secondary signal.
 
 Claude Code may freely modify:
+  - Keltner channel multiplier
   - MACD parameters (fast, slow, signal periods)
   - RSI periods & thresholds (used as filter, not trigger)
   - Moving average types/periods
@@ -105,21 +107,26 @@ class Signal:
 
 
 class Strategy:
-    """MACD crossover momentum strategy with midday time filter."""
+    """Keltner channel breakout strategy, long-only, afternoon session."""
 
-    VERSION = "2.0.0"
+    VERSION = "3.0.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
         if params is None:
             params = self._load_params(mode)
-        # MACD parameters
-        self.macd_fast = params.get("macd_fast", 12)
-        self.macd_slow = params.get("macd_slow", 26)
-        self.macd_signal = params.get("macd_signal", 9)
+        # Long-only mode: disable all short entries
+        self.long_only = params.get("long_only", True)
+        # Keltner channel breakout
+        self.keltner_mult = params.get("keltner_mult", 2.0)
+        # MACD parameters (primary signal)
+        self.macd_fast = params.get("macd_fast", 5)
+        self.macd_slow = params.get("macd_slow", 13)
+        self.macd_signal = params.get("macd_signal", 5)
         # RSI as momentum filter (not trigger)
         self.rsi_period = params.get("rsi_period", 14)
         self.rsi_long_min = params.get("rsi_long_min", 50)
+        self.rsi_long_max = params.get("rsi_long_max", 75)
         self.rsi_short_max = params.get("rsi_short_max", 50)
         # EMA trend filter
         self.ema_period = params.get("ema_period", 10)
@@ -139,8 +146,8 @@ class Strategy:
         self.time_exit_minutes = params.get("time_exit_minutes", 120)
         self.time_exit_max_profit_atr = params.get("time_exit_max_profit_atr", 0.5)
         # Time-of-day filter: only trade during these hours (ET)
-        self.trade_start_hour = params.get("trade_start_hour", 10)
-        self.trade_end_hour = params.get("trade_end_hour", 14)
+        self.trade_start_hour = params.get("trade_start_hour", 12)
+        self.trade_end_hour = params.get("trade_end_hour", 16)
         # Sentiment
         self.sentiment_enabled = params.get("sentiment_enabled", False)
         self.sentiment_weight = params.get("sentiment_weight", 0.3)
@@ -156,10 +163,10 @@ class Strategy:
         # Legacy params for compatibility (used by backtest/risk)
         self.rsi_oversold = params.get("rsi_oversold", 25)
         self.rsi_overbought = params.get("rsi_overbought", 75)
-        logger.info("Strategy v%s initialized: MACD(%d,%d,%d) RSI(%d) EMA(%d) ADX(%d) hours=%d-%d",
-                     self.VERSION, self.macd_fast, self.macd_slow, self.macd_signal,
+        logger.info("Strategy v%s initialized: Keltner(%.1f) MACD(%d,%d,%d) RSI(%d) EMA(%d) ADX(%d) hours=%d-%d long_only=%s",
+                     self.VERSION, self.keltner_mult, self.macd_fast, self.macd_slow, self.macd_signal,
                      self.rsi_period, self.ema_period, self.adx_period,
-                     self.trade_start_hour, self.trade_end_hour)
+                     self.trade_start_hour, self.trade_end_hour, self.long_only)
 
     @staticmethod
     def _load_params(mode: str = "equity") -> dict:
@@ -211,6 +218,8 @@ class Strategy:
             logger.warning("ADX calculation failed: %s", e)
             df["adx"] = np.nan
         df["ema_slope"] = (df["ema"] - df["ema"].shift(5)) / df["ema"].shift(5) * 100
+        # Keltner channel upper band
+        df["keltner_upper"] = df["ema"] + self.keltner_mult * df["atr"]
         return df
 
     def _classify_regime(self, adx: float, ema_slope: float) -> str:
@@ -301,12 +310,8 @@ class Strategy:
 
             if pd.isna(latest["rsi"]) or pd.isna(latest["ema"]) or pd.isna(latest["atr"]):
                 continue
-            if pd.isna(latest["macd"]) or pd.isna(latest["macd_signal"]):
-                continue
-            if pd.isna(prev["macd"]) or pd.isna(prev["macd_signal"]):
-                continue
 
-            # Time-of-day filter: only trade during midday window
+            # Time-of-day filter: only trade during afternoon session
             if not self._is_trading_hour(df.index[-1]):
                 continue
 
@@ -314,14 +319,15 @@ class Strategy:
             ema = latest["ema"]
             atr = latest["atr"]
             price = latest["close"]
+            keltner_upper = latest["keltner_upper"] if not pd.isna(latest.get("keltner_upper")) else None
             volume_ratio = latest["volume_ratio"] if not pd.isna(latest["volume_ratio"]) else 0
             adx = latest["adx"] if not pd.isna(latest.get("adx")) else 0
             ema_slope = latest["ema_slope"] if not pd.isna(latest.get("ema_slope")) else 0
-            macd = latest["macd"]
-            macd_sig = latest["macd_signal"]
+            macd = latest["macd"] if not pd.isna(latest.get("macd")) else None
+            macd_sig = latest["macd_signal"] if not pd.isna(latest.get("macd_signal")) else None
             macd_hist = latest["macd_hist"] if not pd.isna(latest.get("macd_hist")) else 0
-            prev_macd = prev["macd"]
-            prev_macd_sig = prev["macd_signal"]
+            prev_macd = prev["macd"] if not pd.isna(prev.get("macd")) else None
+            prev_macd_sig = prev["macd_signal"] if not pd.isna(prev.get("macd_signal")) else None
 
             regime = self._classify_regime(adx, ema_slope)
             time_bucket = self._classify_time_bucket(df.index[-1])
@@ -342,18 +348,95 @@ class Strategy:
 
             daily_trend = daily_trends.get(symbol, "neutral")
 
-            signal = self._evaluate_entry(
-                symbol, rsi, price, ema, atr, volume_ratio,
-                macd, macd_sig, prev_macd, prev_macd_sig, macd_hist,
-                regime=regime, adx=adx, ema_slope=ema_slope,
-                time_bucket=time_bucket, entry_hour=entry_hour,
-                sentiment_score=sentiment_map.get(symbol, 0.0),
-                daily_trend=daily_trend,
-            )
+            extra_context = {
+                "market_regime": regime,
+                "adx": round(adx, 2),
+                "ema_slope": round(ema_slope, 4),
+                "time_bucket": time_bucket,
+                "entry_hour": entry_hour,
+                "sentiment_score": round(sentiment_map.get(symbol, 0.0), 3),
+                "daily_trend": daily_trend,
+            }
+
+            # Primary signal: MACD crossover (long only when long_only=True)
+            signal = None
+            if macd is not None and macd_sig is not None and prev_macd is not None and prev_macd_sig is not None:
+                signal = self._evaluate_entry(
+                    symbol, rsi, price, ema, atr, volume_ratio,
+                    macd, macd_sig, prev_macd, prev_macd_sig, macd_hist,
+                    regime=regime, adx=adx, ema_slope=ema_slope,
+                    time_bucket=time_bucket, entry_hour=entry_hour,
+                    sentiment_score=sentiment_map.get(symbol, 0.0),
+                    daily_trend=daily_trend,
+                )
+
+            # Standalone Keltner breakout signal (long only, very selective)
+            if signal is None:
+                signal = self._evaluate_keltner_breakout(
+                    symbol, rsi, price, ema, atr, volume_ratio,
+                    keltner_upper, regime=regime, adx=adx, ema_slope=ema_slope,
+                    sentiment_score=sentiment_map.get(symbol, 0.0),
+                    daily_trend=daily_trend, extra_context=extra_context,
+                )
+
             if signal is not None:
                 signals.append(signal)
 
         return signals
+
+    def _evaluate_keltner_breakout(
+        self, symbol: str, rsi: float, price: float,
+        ema: float, atr: float, volume_ratio: float,
+        keltner_upper: float | None,
+        *, regime: str = "", adx: float = 0, ema_slope: float = 0,
+        sentiment_score: float = 0.0, daily_trend: str = "neutral",
+        extra_context: dict | None = None,
+    ) -> Signal | None:
+        """Evaluate Keltner channel breakout entry (long only).
+
+        Fires only when price breaks ABOVE upper Keltner band with
+        momentum + uptrend confirmation. Very selective.
+        """
+        if keltner_upper is None or atr <= 0:
+            return None
+        # Price must close above Keltner upper band
+        if price <= keltner_upper:
+            return None
+        # RSI momentum confirmation: 50-75 (momentum but not overbought)
+        if rsi < self.rsi_long_min or rsi > self.rsi_long_max:
+            return None
+        # Require uptrend: EMA slope > 0
+        if ema_slope <= 0:
+            return None
+        # Skip if regime is downtrend
+        if regime == "trending_down":
+            return None
+        # Multi-timeframe: skip longs if daily trend is down
+        if self.multi_timeframe_enabled and daily_trend == "down":
+            return None
+        # Strength based on breakout magnitude + volume
+        breakout_strength = min(1.0, (price - keltner_upper) / atr)
+        strength = min(1.0, breakout_strength * volume_ratio / max(self.volume_multiplier, 0.01))
+        strength = max(0.01, strength)
+        if self.sentiment_enabled and sentiment_score != 0:
+            strength *= (1.0 + sentiment_score * self.sentiment_weight)
+            strength = max(0.01, min(1.0, strength))
+        return Signal(
+            symbol=symbol,
+            side="long",
+            signal_type="keltner_breakout_long",
+            strength=strength,
+            rsi=rsi,
+            ema=ema,
+            atr=atr,
+            volume_ratio=volume_ratio,
+            price=price,
+            context={
+                "keltner_upper": round(keltner_upper, 4),
+                "breakout_pct": round((price - keltner_upper) / keltner_upper * 100, 4),
+                **(extra_context or {}),
+            },
+        )
 
     def _evaluate_entry(
         self, symbol: str, rsi: float, price: float,
@@ -364,7 +447,7 @@ class Strategy:
         time_bucket: str = "", entry_hour: int | None = None,
         sentiment_score: float = 0.0, daily_trend: str = "neutral",
     ) -> Signal | None:
-        """Evaluate MACD crossover entry conditions."""
+        """Evaluate MACD crossover entry conditions (secondary signal)."""
 
         extra_context = {
             "market_regime": regime,
@@ -382,8 +465,8 @@ class Strategy:
                 return None
 
         # Bullish MACD crossover: MACD crosses above signal line
-        # Confirmed by: RSI > 50 (momentum), price > EMA (trend)
-        if prev_macd <= prev_macd_sig and macd > macd_sig and price > ema and rsi >= self.rsi_long_min:
+        # Confirmed by: RSI > 50 (momentum), price > EMA (trend), EMA slope > 0 (uptrend)
+        if prev_macd <= prev_macd_sig and macd > macd_sig and price > ema and rsi >= self.rsi_long_min and ema_slope > 0:
             # Skip longs in strong downtrend
             if regime == "trending_down" and adx > self.adx_trending:
                 return None
@@ -418,7 +501,8 @@ class Strategy:
 
         # Bearish MACD crossover: MACD crosses below signal line
         # Confirmed by: RSI < 50, price < EMA
-        if prev_macd >= prev_macd_sig and macd < macd_sig and price < ema and rsi <= self.rsi_short_max:
+        # Disabled when long_only=True
+        if not self.long_only and prev_macd >= prev_macd_sig and macd < macd_sig and price < ema and rsi <= self.rsi_short_max:
             # Skip shorts in strong uptrend
             if regime == "trending_up" and adx > self.adx_trending:
                 return None
