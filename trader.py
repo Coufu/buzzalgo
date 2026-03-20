@@ -149,6 +149,7 @@ class Trader:
             self.circuit_breaker_triggered = False
             self._daily_summary_logged = False
             self._pending_order_symbols.clear()
+            self._reconcile_positions()
             self.today = today
             logger.info("New trading day: %s | Equity: $%.2f", today, self.starting_equity)
 
