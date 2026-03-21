@@ -108,6 +108,19 @@ class Trader:
         self._reconcile_positions()
         logger.info("Trader initialized - paper trading mode")
 
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        """Normalize symbol for comparison (LTCUSD -> LTC/USD)."""
+        # Alpaca crypto uses BTCUSD, our DB uses BTC/USD
+        if symbol.endswith("USD") and len(symbol) > 3 and "/" not in symbol:
+            # Check if it looks like a crypto pair (not a stock like SOXLUSD doesn't exist)
+            base = symbol[:-3]
+            crypto_bases = {"BTC", "ETH", "SOL", "AVAX", "DOGE", "LINK", "LTC", "UNI",
+                            "XRP", "BCH", "DOT", "AAVE", "SHIB", "GRT", "SUSHI", "BAT", "CRV"}
+            if base in crypto_bases:
+                return f"{base}/USD"
+        return symbol
+
     def _reconcile_positions(self):
         """On startup, close any Alpaca positions not tracked in the DB."""
         try:
@@ -116,7 +129,10 @@ class Trader:
                 db_open = db.get_open_trades(conn)
             db_symbols = {t["symbol"] for t in db_open}
 
-            orphans = set(alpaca_positions.keys()) - db_symbols
+            # Normalize Alpaca symbols for comparison
+            alpaca_normalized = {self._normalize_symbol(s): s for s in alpaca_positions}
+            orphan_raw = {alpaca_normalized[s] for s in set(alpaca_normalized.keys()) - db_symbols}
+            orphans = orphan_raw
             if not orphans:
                 logger.info("Position reconciliation: all %d positions tracked", len(alpaca_positions))
                 return
@@ -359,7 +375,14 @@ class Trader:
             return
 
         try:
-            positions = {p.symbol: p for p in self.trading_client.get_all_positions()}
+            raw_positions = {p.symbol: p for p in self.trading_client.get_all_positions()}
+            # Build lookup with both raw and normalized symbols
+            positions = {}
+            for raw_sym, p in raw_positions.items():
+                positions[raw_sym] = p
+                norm = self._normalize_symbol(raw_sym)
+                if norm != raw_sym:
+                    positions[norm] = p
         except Exception as e:
             logger.error("Failed to get positions: %s", e)
             return

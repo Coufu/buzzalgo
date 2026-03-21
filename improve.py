@@ -15,6 +15,7 @@ import logging
 import os
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -537,6 +538,47 @@ def log_improvement(hypothesis: str, changes: str, backtest_sharpe: float,
         )
 
 
+def _build_equity_chart_url(equities: list[tuple[str, float]]) -> str:
+    """Build a QuickChart.io URL for an equity line chart."""
+    if len(equities) < 2:
+        return ""
+    labels = [e[0][-5:] for e in equities]  # MM-DD
+    values = [round(e[1], 2) for e in equities]
+    # Show ~10 labels max to avoid clutter
+    step = max(1, len(labels) // 10)
+    display_labels = [labels[i] if i % step == 0 else "" for i in range(len(labels))]
+
+    chart_config = {
+        "type": "line",
+        "data": {
+            "labels": display_labels,
+            "datasets": [{
+                "label": "Equity",
+                "data": values,
+                "borderColor": "#4CAF50" if values[-1] >= values[0] else "#F44336",
+                "backgroundColor": "rgba(76,175,80,0.1)" if values[-1] >= values[0] else "rgba(244,67,54,0.1)",
+                "fill": True,
+                "pointRadius": 0,
+                "borderWidth": 2,
+            }],
+        },
+        "options": {
+            "plugins": {
+                "title": {"display": True, "text": f"Equity Curve ({len(equities)} days)", "color": "#fff"},
+                "legend": {"display": False},
+            },
+            "scales": {
+                "x": {"ticks": {"color": "#aaa"}, "grid": {"color": "#333"}},
+                "y": {"ticks": {"color": "#aaa", "callback": "function(v){return '$'+v.toLocaleString()}"}, "grid": {"color": "#333"}},
+            },
+            "layout": {"padding": 10},
+        },
+    }
+    chart_json = json.dumps(chart_config)
+    encoded = urllib.parse.quote(chart_json)
+    return f"https://quickchart.io/chart?c={encoded}&w=600&h=300&bkg=%23222222"
+
+
 def send_daily_journal():
     """Send an end-of-day trading journal to Slack."""
     today = datetime.now(ET).strftime("%Y-%m-%d")
@@ -555,11 +597,49 @@ def send_daily_journal():
         ).fetchall()
         open_trades = [dict(r) for r in open_trades]
 
-        # Daily performance
+        # Daily performance — today
         dp = conn.execute(
             "SELECT * FROM daily_performance WHERE date = ?",
             (today,),
         ).fetchone()
+
+        # Equity history for chart (last 90 days)
+        equity_rows = conn.execute(
+            "SELECT date, ending_equity FROM daily_performance "
+            "WHERE ending_equity IS NOT NULL ORDER BY date DESC LIMIT 90",
+        ).fetchall()
+        equity_history = [(r["date"], r["ending_equity"]) for r in reversed(equity_rows)]
+
+        # Weekly stats (last 5 trading days)
+        week_rows = [
+            dict(r) for r in conn.execute(
+                "SELECT * FROM daily_performance ORDER BY date DESC LIMIT 5",
+            ).fetchall()
+        ]
+
+        # All-time stats
+        all_closed = conn.execute(
+            "SELECT COUNT(*) as cnt, SUM(pnl) as total, "
+            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins "
+            "FROM trades WHERE status = 'closed'",
+        ).fetchone()
+
+        # Signal type breakdown today
+        signal_stats = conn.execute(
+            "SELECT signal_type, COUNT(*) as cnt, SUM(pnl) as total, "
+            "SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins "
+            "FROM trades WHERE date(closed_at) = ? AND status = 'closed' "
+            "GROUP BY signal_type ORDER BY total DESC",
+            (today,),
+        ).fetchall()
+        signal_stats = [dict(r) for r in signal_stats]
+
+        # Strategy version
+        try:
+            with open(STRATEGY_JSON) as _f:
+                _sv = json.load(_f).get("version", "?")
+        except Exception:
+            _sv = "?"
 
         # Sentiment
         sentiment_rows = conn.execute(
@@ -571,39 +651,83 @@ def send_daily_journal():
         logger.info("No trading activity today — skipping journal")
         return
 
-    # Build journal
+    # --- Build journal ---
     total_pnl = sum(t.get("pnl", 0) for t in closed)
     wins = [t for t in closed if (t.get("pnl") or 0) > 0]
     losses = [t for t in closed if (t.get("pnl") or 0) <= 0]
+    win_rate = len(wins) / len(closed) * 100 if closed else 0
 
-    equity = dp["ending_equity"] if dp and dp["ending_equity"] else "N/A"
-    equity_str = f"${equity:,.2f}" if isinstance(equity, (int, float)) else equity
+    equity = dp["ending_equity"] if dp and dp["ending_equity"] else None
+    starting = dp["starting_equity"] if dp and dp["starting_equity"] else None
+    daily_return = dp["daily_return_pct"] if dp else 0
 
     pnl_emoji = ":chart_with_upwards_trend:" if total_pnl >= 0 else ":chart_with_downwards_trend:"
-    date_str = datetime.now(ET).strftime("%b %d")
+    date_str = datetime.now(ET).strftime("%A, %b %d")
 
     msg = f"{pnl_emoji} *Daily Journal — {date_str}*\n"
-    msg += f"P&L: ${total_pnl:+.2f} | Trades: {len(closed)} ({len(wins)}W/{len(losses)}L)\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
 
+    # Today's headline
+    msg += f"*P&L:* `${total_pnl:+.2f}` ({daily_return:+.2f}%)\n"
+    msg += f"*Trades:* {len(closed)} ({len(wins)}W / {len(losses)}L) — {win_rate:.0f}% win rate\n"
+    if equity:
+        msg += f"*Equity:* `${equity:,.2f}`"
+        if starting:
+            change = equity - starting
+            msg += f" (${change:+,.2f} from open)"
+        msg += "\n"
+
+    # Best/worst
     if closed:
         best = max(closed, key=lambda t: t.get("pnl", 0))
         worst = min(closed, key=lambda t: t.get("pnl", 0))
-        msg += f"Best: {best['symbol']} {best['side']} ${best.get('pnl', 0):+.2f}\n"
-        exit_reason = worst.get("signal_type", "")
-        msg += f"Worst: {worst['symbol']} {worst['side']} ${worst.get('pnl', 0):+.2f}\n"
+        msg += f"*Best:* {best['symbol']} {best['side']} `${best.get('pnl', 0):+.2f}`\n"
+        msg += f"*Worst:* {worst['symbol']} {worst['side']} `${worst.get('pnl', 0):+.2f}`\n"
 
-    msg += f"Equity: {equity_str}\n"
+    # Signal breakdown
+    if signal_stats:
+        msg += f"\n*By Signal Type:*\n"
+        for s in signal_stats:
+            sw = s["wins"] or 0
+            sc = s["cnt"] or 1
+            msg += f"  `{s['signal_type']}` — {sc} trades, {sw}/{sc} wins, ${s['total'] or 0:+.2f}\n"
 
+    # Open positions
     if open_trades:
-        open_syms = ", ".join(t["symbol"] for t in open_trades)
-        msg += f"Open positions: {open_syms}\n"
+        msg += f"\n*Open Positions:* {len(open_trades)}\n"
+        for t in open_trades:
+            msg += f"  {t['symbol']} {t['side']} @ ${t['entry_price']:.2f}\n"
 
+    # Weekly summary
+    if week_rows:
+        week_pnl = sum(r.get("daily_pnl") or 0 for r in week_rows)
+        week_trades = sum(r.get("trades_taken") or 0 for r in week_rows)
+        week_wins = sum(r.get("wins") or 0 for r in week_rows)
+        week_losses = sum(r.get("losses") or 0 for r in week_rows)
+        msg += f"\n*Last 5 Days:* `${week_pnl:+.2f}` — {week_trades} trades ({week_wins}W/{week_losses}L)\n"
+
+    # All-time
+    if all_closed and all_closed["cnt"]:
+        at_wr = (all_closed["wins"] or 0) / all_closed["cnt"] * 100
+        msg += f"*All-Time:* `${all_closed['total'] or 0:+.2f}` — {all_closed['cnt']} trades, {at_wr:.0f}% WR\n"
+
+    # Sentiment
     if sentiment_rows:
         avg_sentiment = sum(r["avg"] for r in sentiment_rows) / len(sentiment_rows)
         label = "bullish" if avg_sentiment > 0.2 else "bearish" if avg_sentiment < -0.2 else "neutral"
-        msg += f"Sentiment: {label} ({avg_sentiment:+.2f})"
+        msg += f"\n*Sentiment:* {label} ({avg_sentiment:+.2f})"
+
+    # Footer
+    msg += f"\n`Strategy v{_sv} | 15-min bars | max 5 trades/day`"
 
     _notify_slack(msg)
+
+    # Send equity chart as separate message so Slack unfurls it as an image
+    if equity_history:
+        chart_url = _build_equity_chart_url(equity_history)
+        if chart_url:
+            _notify_slack(chart_url)
+
     logger.info("Daily journal sent to Slack")
 
 
