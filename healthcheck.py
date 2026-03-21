@@ -166,13 +166,17 @@ def check_position_sync() -> dict:
             db_open = db.get_open_trades(conn)
         db_symbols = {t["symbol"] for t in db_open}
 
-        # Normalize crypto symbols: Alpaca uses "BTCUSD", DB uses "BTC/USD"
-        alpaca_symbols = set()
-        for sym in alpaca_positions:
-            if sym.endswith("USD") and len(sym) > 3 and not sym.startswith(("S", "T", "U", "E", "P", "V", "W", "D", "G", "H", "I", "A", "B", "C", "F", "J", "K", "L", "M", "N", "O", "Q", "R", "X", "Y", "Z")):
-                pass  # ambiguous, skip normalization
-            alpaca_symbols.add(sym)
+        # Normalize Alpaca crypto symbols (BTCUSD -> BTC/USD) to match DB format
+        def _normalize(sym: str) -> str:
+            if sym.endswith("USD") and "/" not in sym and len(sym) > 3:
+                base = sym[:-3]
+                crypto_bases = {"BTC", "ETH", "SOL", "AVAX", "DOGE", "LINK", "LTC", "UNI",
+                                "XRP", "BCH", "DOT", "AAVE", "SHIB", "GRT", "SUSHI", "BAT", "CRV"}
+                if base in crypto_bases:
+                    return f"{base}/USD"
+            return sym
 
+        alpaca_symbols = {_normalize(sym) for sym in alpaca_positions}
         orphan_alpaca = alpaca_symbols - db_symbols
         orphan_db = db_symbols - alpaca_symbols
 

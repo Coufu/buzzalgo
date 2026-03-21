@@ -35,12 +35,15 @@ from backtest import run_backtest
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 
-def _notify_slack(text: str):
+def _notify_slack(text: str, image_url: str | None = None):
     """Send a Slack notification via webhook."""
     if not SLACK_WEBHOOK_URL:
         return
     try:
-        payload = json.dumps({"text": text}).encode()
+        payload_dict: dict = {"text": text}
+        if image_url:
+            payload_dict["attachments"] = [{"image_url": image_url, "fallback": "Equity Chart"}]
+        payload = json.dumps(payload_dict).encode()
         req = urllib.request.Request(
             SLACK_WEBHOOK_URL, data=payload,
             headers={"Content-Type": "application/json"},
@@ -720,14 +723,8 @@ def send_daily_journal():
     # Footer
     msg += f"\n`Strategy v{_sv} | 15-min bars | max 5 trades/day`"
 
-    _notify_slack(msg)
-
-    # Send equity chart as separate message so Slack unfurls it as an image
-    if equity_history:
-        chart_url = _build_equity_chart_url(equity_history)
-        if chart_url:
-            _notify_slack(chart_url)
-
+    chart_url = _build_equity_chart_url(equity_history) if equity_history else None
+    _notify_slack(msg, image_url=chart_url)
     logger.info("Daily journal sent to Slack")
 
 

@@ -44,7 +44,7 @@ def init_db(db_path: str | Path = DB_PATH):
                 timestamp TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 side TEXT NOT NULL,
-                qty INTEGER NOT NULL,
+                qty REAL NOT NULL,
                 entry_price REAL NOT NULL,
                 exit_price REAL,
                 stop_price REAL,
