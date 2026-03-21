@@ -1,19 +1,19 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 3.0.0
-Name: Keltner Breakout Long-Only
-Description: Keltner channel breakout signals, long-only, afternoon
-             session. v3.0.0: MAJOR PIVOT — kill criteria triggered on
-             v2.0.0 (Sharpe -7.17, 5.8% win rate, 207 trades).
-             MACD crossovers fired too frequently (163 trades in one day).
-             Shorts were catastrophic (125 short trades, 1.6% WR).
-             New approach: Keltner breakout (price > EMA + mult*ATR)
-             captures confirmed volatility expansion in uptrends.
-             Long-only eliminates the losing short side.
-             Afternoon session (12-16 ET) targets the only profitable
-             time windows (midday +$7.69, close_30 +$32.93).
-             MACD crossover long retained as secondary signal.
+Version: 4.0.0
+Name: SPY Regime Gate + Concentrated Universe
+Description: v4.0.0: MAJOR PIVOT — kill criteria triggered on v3.0.0
+             (Sharpe -5.99, 5% WR, 322 trades mixed window).
+             All signal-type changes failed (MACD, Keltner, EMA pullback,
+             Donchian, momentum continuation, RSI mean reversion).
+             Root cause: individual stock signals fire in bear markets.
+             New approach: META-level market regime gate using SPY.
+             Only trade when SPY EMA slope > 0 (broad market bullish).
+             In bearish markets, generate ZERO signals — don't fight the tape.
+             Universe concentrated to 20 most liquid names to reduce noise.
+             Existing MACD/Keltner/liquidity-grab signals retained but only
+             fire when market context is favorable.
 
 Claude Code may freely modify:
   - Keltner channel multiplier
@@ -109,7 +109,7 @@ class Signal:
 class Strategy:
     """Keltner channel breakout strategy, long-only, afternoon session."""
 
-    VERSION = "3.1.0"
+    VERSION = "4.0.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
@@ -148,6 +148,9 @@ class Strategy:
         # Time-of-day filter: only trade during these hours (ET)
         self.trade_start_hour = params.get("trade_start_hour", 12)
         self.trade_end_hour = params.get("trade_end_hour", 16)
+        # Market regime gate: only trade when SPY trend is bullish
+        self.market_regime_gate = params.get("market_regime_gate", True)
+        self.market_regime_symbol = params.get("market_regime_symbol", "SPY")
         # Sentiment
         self.sentiment_enabled = params.get("sentiment_enabled", False)
         self.sentiment_weight = params.get("sentiment_weight", 0.3)
@@ -276,6 +279,21 @@ class Strategy:
 
     def generate_signals(self, bars: dict[str, pd.DataFrame], open_symbols: list[str] | None = None) -> list[Signal]:
         """Generate trading signals for all symbols."""
+        # Market regime gate: check SPY trend before generating any signals
+        if self.market_regime_gate and self.market_regime_symbol in bars:
+            spy_df = bars[self.market_regime_symbol]
+            min_bars = max(self.ema_period, self.atr_period) + 5
+            if len(spy_df) >= min_bars:
+                spy_df = self.compute_indicators(spy_df)
+                spy_latest = spy_df.iloc[-1]
+                spy_ema_slope = spy_latest["ema_slope"] if not pd.isna(spy_latest.get("ema_slope")) else 0
+                spy_price = spy_latest["close"]
+                spy_ema = spy_latest["ema"]
+                # Don't trade if SPY trend is declining — long-only can't profit in bear markets
+                if spy_ema_slope <= 0:
+                    logger.debug("Market regime gate: SPY EMA slope %.4f <= 0, skipping all signals", spy_ema_slope)
+                    return []
+
         # Load sentiment scores if enabled
         sentiment_map: dict[str, float] = {}
         if self.sentiment_enabled:

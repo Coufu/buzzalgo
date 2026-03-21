@@ -1,7 +1,7 @@
 {
-    "version": "3.0.0",
-    "name": "Keltner Breakout Long-Only v3.0",
-    "description": "Keltner channel breakout (long-only) with MACD crossover secondary signal, afternoon session, volume + ADX + RSI filters",
+    "version": "4.0.0",
+    "name": "SPY Regime Gate + Concentrated v4.0",
+    "description": "SPY regime gate (only trade when SPY uptrend) + concentrated 20-name universe, MACD/Keltner/liquidity-grab signals",
     "parameters": {
         "long_only": true,
         "keltner_mult": 3.0,
@@ -15,7 +15,7 @@
         "rsi_oversold": 25,
         "rsi_overbought": 75,
         "ema_period": 10,
-        "volume_multiplier": 1.5,
+        "volume_multiplier": 2.0,
         "volume_lookback": 20,
         "atr_period": 14,
         "adx_period": 14,
@@ -34,19 +34,14 @@
         "sentiment_lookback_hours": 24,
         "multi_timeframe_enabled": true,
         "daily_trend_period": 5,
-        "max_positions_per_sector": 2
+        "max_positions_per_sector": 2,
+        "market_regime_gate": true,
+        "market_regime_symbol": "SPY"
     },
     "universe": [
-        "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV", "XLI", "XLP",
-        "GLD", "SLV", "EEM", "TLT", "HYG", "ARKK", "SOXL", "TQQQ",
-        "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "NFLX", "AMD", "CRM",
-        "JPM", "V", "JNJ", "UNH", "HD", "PG", "MA", "DIS", "BAC", "XOM",
-        "AVGO", "COST", "LLY", "ABBV", "WMT", "KO", "PEP", "MRK", "ORCL", "ADBE",
-        "T", "INTC", "CSCO", "PYPL", "SQ", "COIN", "UBER", "ABNB", "SNAP", "PLTR",
-        "SOFI", "HOOD", "RIVN", "LCID", "NIO", "MARA", "RIOT", "SMCI", "ARM", "MSTR",
-        "RBLX", "DKNG", "ENPH", "FSLR", "CCL", "AAL", "DAL", "UAL", "F", "GM",
-        "ROKU", "SHOP", "SE", "BABA", "JD", "PDD", "BILI", "GRAB", "NU", "MELI",
-        "CRWD", "PANW", "ZS", "NET", "DDOG", "MDB", "SNOW", "PATH", "U", "RKLB"
+        "SPY", "QQQ", "IWM", "DIA", "XLK", "TQQQ",
+        "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA",
+        "AMD", "AVGO", "JPM", "V", "UNH", "LLY", "CRM"
     ],
     "kill_criteria": {
         "min_trades": 50,
