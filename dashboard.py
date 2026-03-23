@@ -113,6 +113,12 @@ def get_today_pnl():
             "SELECT starting_equity FROM daily_performance WHERE date = ?",
             (today,),
         ).fetchone()
+        if not dp or not dp["starting_equity"]:
+            # Fallback: use the most recent ending equity
+            dp = conn.execute(
+                "SELECT ending_equity as starting_equity FROM daily_performance "
+                "WHERE ending_equity IS NOT NULL ORDER BY date DESC LIMIT 1",
+            ).fetchone()
 
     if dp and dp["starting_equity"] and dp["starting_equity"] > 0:
         pnl = current_equity - dp["starting_equity"]
