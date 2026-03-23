@@ -103,15 +103,23 @@ def get_trades(days: int = 1):
 
 @app.get("/api/today-pnl")
 def get_today_pnl():
-    """Calendar-day P&L from closed trades today."""
+    """Calendar-day P&L: equity change from start of day (realized + unrealized)."""
     today = datetime.now(ET).date().isoformat()
+    account = _get_account_info()
+    current_equity = account.get("equity", 0)
+
     with db.get_db() as conn:
-        rows = conn.execute(
-            "SELECT COALESCE(SUM(pnl), 0) as pnl, COUNT(*) as cnt "
-            "FROM trades WHERE date(closed_at) = ? AND status = 'closed'",
+        dp = conn.execute(
+            "SELECT starting_equity FROM daily_performance WHERE date = ?",
             (today,),
         ).fetchone()
-    return {"pnl": round(rows["pnl"], 2), "trades": rows["cnt"]}
+
+    if dp and dp["starting_equity"] and dp["starting_equity"] > 0:
+        pnl = current_equity - dp["starting_equity"]
+    else:
+        pnl = 0
+
+    return {"pnl": round(pnl, 2), "equity": round(current_equity, 2)}
 
 
 @app.get("/api/daily-pnl")
