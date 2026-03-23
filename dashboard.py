@@ -101,6 +101,19 @@ def get_trades(days: int = 1):
     return {"trades": trades, "count": len(trades)}
 
 
+@app.get("/api/today-pnl")
+def get_today_pnl():
+    """Calendar-day P&L from closed trades today."""
+    today = datetime.now(ET).date().isoformat()
+    with db.get_db() as conn:
+        rows = conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) as pnl, COUNT(*) as cnt "
+            "FROM trades WHERE date(closed_at) = ? AND status = 'closed'",
+            (today,),
+        ).fetchone()
+    return {"pnl": round(rows["pnl"], 2), "trades": rows["cnt"]}
+
+
 @app.get("/api/daily-pnl")
 def get_daily_pnl(days: int = 30):
     since = (datetime.now(ET) - timedelta(days=days)).date().isoformat()
@@ -269,16 +282,34 @@ def dashboard_page():
 const $ = id => document.getElementById(id);
 const fmt = (v, pre='$') => v >= 0
   ? `<span class="positive">${pre}${Math.abs(v).toFixed(2)}</span>`
-  : `<span class="negative">${pre}${Math.abs(v).toFixed(2)}</span>`;
+  : `<span class="negative">-${pre}${Math.abs(v).toFixed(2)}</span>`;
+
+function fmtPrice(v) {
+  if (v == null) return '--';
+  const abs = Math.abs(v);
+  if (abs === 0) return '$0';
+  if (abs < 0.001) return '$' + v.toFixed(8);
+  if (abs < 1) return '$' + v.toFixed(4);
+  return '$' + v.toFixed(2);
+}
+
+function fmtQty(v) {
+  if (v == null) return '--';
+  if (v > 1000000) return (v/1000000).toFixed(1) + 'M';
+  if (v > 1000) return (v/1000).toFixed(1) + 'K';
+  if (Number.isInteger(v)) return v.toString();
+  return v.toFixed(4);
+}
 
 async function refresh() {
   try {
-    const [status, positions, trades, metrics, improvements] = await Promise.all([
+    const [status, positions, trades, metrics, improvements, todayPnlData] = await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/positions').then(r=>r.json()),
       fetch('/api/trades?days=3').then(r=>r.json()),
       fetch('/api/metrics?days=30').then(r=>r.json()),
       fetch('/api/improvements?limit=10').then(r=>r.json()),
+      fetch('/api/today-pnl').then(r=>r.json()),
     ]);
 
     // Status
@@ -297,32 +328,30 @@ async function refresh() {
     $('m-trades').textContent = metrics.total_trades;
     $('m-pnl').innerHTML = fmt(metrics.total_pnl);
 
-    // Daily PNL from today's trades
-    const todayTrades = trades.trades.filter(t => t.status === 'closed');
-    const todayPnl = todayTrades.reduce((s, t) => s + (t.pnl || 0), 0);
-    $('daily-pnl').innerHTML = fmt(todayPnl);
+    // Daily PNL — calendar day
+    $('daily-pnl').innerHTML = fmt(todayPnlData.pnl);
 
     // Positions table
     $('positions-body').innerHTML = positions.positions.length
       ? positions.positions.map(p => `<tr>
-          <td><strong>${p.symbol}</strong></td><td>${p.side}</td><td>${p.qty}</td>
-          <td>$${p.entry_price?.toFixed(2)}</td><td>$${p.stop_price?.toFixed(2)}</td>
-          <td>$${p.take_profit_price?.toFixed(2)}</td><td>${p.signal_type || '-'}</td>
+          <td><strong>${p.symbol}</strong></td><td>${p.side}</td><td>${fmtQty(p.qty)}</td>
+          <td>${fmtPrice(p.entry_price)}</td><td>${fmtPrice(p.stop_price)}</td>
+          <td>${fmtPrice(p.take_profit_price)}</td><td>${p.signal_type || '-'}</td>
         </tr>`).join('')
       : '<tr><td colspan="7" style="color:var(--muted);text-align:center">No open positions</td></tr>';
 
-    // Trades table
+    // Trades table — only today and yesterday
     const closedTrades = trades.trades.filter(t => t.status === 'closed').slice(-15);
     $('trades-body').innerHTML = closedTrades.length
       ? closedTrades.reverse().map(t => `<tr>
           <td><strong>${t.symbol}</strong></td><td>${t.side}</td>
-          <td>$${t.entry_price?.toFixed(2)}</td><td>$${(t.exit_price||0).toFixed(2)}</td>
+          <td>${fmtPrice(t.entry_price)}</td><td>${fmtPrice(t.exit_price)}</td>
           <td>${fmt(t.pnl||0)}</td><td>${t.signal_type||'-'}</td>
-          <td style="color:var(--muted)">${(t.closed_at||'').slice(11,16)}</td>
+          <td style="color:var(--muted)">${(t.closed_at||'').slice(5,16).replace('T',' ')}</td>
         </tr>`).join('')
       : '<tr><td colspan="7" style="color:var(--muted);text-align:center">No recent trades</td></tr>';
 
-    // Improvements
+    // Improvements — fall back to git log if DB is empty
     $('improvements').innerHTML = improvements.improvements.length
       ? improvements.improvements.map(i => `<div class="improvement-item">
           <div style="font-size:11px;color:var(--muted)">${(i.timestamp||'').slice(0,16)}</div>
@@ -330,7 +359,7 @@ async function refresh() {
           <div><span class="${i.deployed ? 'tag-deployed' : 'tag-reverted'}">${i.deployed ? 'DEPLOYED' : 'REVERTED'}</span>
           Sharpe: ${(i.backtest_sharpe||0).toFixed(3)}</div>
         </div>`).join('')
-      : '<div style="color:var(--muted)">No improvements yet</div>';
+      : '<div style="color:var(--muted)">Improvements are logged in improvement_log.md and git history</div>';
   } catch(e) { console.error('Refresh error:', e); }
 }
 
