@@ -109,7 +109,7 @@ class Signal:
 class Strategy:
     """VWAP reversion strategy, long-only, with trend-following secondaries."""
 
-    VERSION = "6.0.0"
+    VERSION = "7.0.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
@@ -404,12 +404,25 @@ class Strategy:
                 "daily_trend": daily_trend,
             }
 
-            # Primary signal: VWAP Reversion (mean-reversion to fair value)
-            # Works in all regimes — stocks oscillate around VWAP intraday
-            signal = self._evaluate_vwap_reversion(
+            # Primary signal: RSI Divergence (research winner: Sharpe 0.83)
+            signal = self._evaluate_rsi_divergence(
                 symbol, df, rsi, price, ema, atr, volume_ratio,
                 extra_context=extra_context,
             )
+
+            # Secondary: Volume Spike Reversal (research: near breakeven, high WR)
+            if signal is None:
+                signal = self._evaluate_volume_spike(
+                    symbol, latest, price, ema, atr, rsi, volume_ratio,
+                    extra_context=extra_context,
+                )
+
+            # Tertiary: VWAP Reversion (mean-reversion to fair value)
+            if signal is None:
+                signal = self._evaluate_vwap_reversion(
+                    symbol, df, rsi, price, ema, atr, volume_ratio,
+                    extra_context=extra_context,
+                )
 
             # Secondary signal: Higher-Low Momentum (price structure)
             if signal is None:
@@ -518,6 +531,112 @@ class Strategy:
                 **(extra_context or {}),
             },
         )
+
+    def _find_rsi_divergence(self, df: pd.DataFrame) -> str | None:
+        """Check for RSI divergence in the last 10 bars.
+
+        Bullish: price makes new low but RSI makes higher low.
+        Bearish: price makes new high but RSI makes lower high.
+        """
+        lookback = 10
+        if len(df) < lookback + 1:
+            return None
+        window = df.iloc[-(lookback + 1):]
+        prices = window["close"].values
+        rsis = window["rsi"].values
+        if any(np.isnan(rsis)):
+            return None
+
+        prev_prices = prices[:-1]
+        prev_rsis = rsis[:-1]
+        curr_price = prices[-1]
+        curr_rsi = rsis[-1]
+
+        # Bullish: price new low, RSI higher low
+        low_idx = np.argmin(prev_prices)
+        if curr_price < prev_prices[low_idx] and curr_rsi > prev_rsis[low_idx]:
+            return "bullish"
+
+        # Bearish: price new high, RSI lower high
+        high_idx = np.argmax(prev_prices)
+        if curr_price > prev_prices[high_idx] and curr_rsi < prev_rsis[high_idx]:
+            return "bearish"
+
+        return None
+
+    def _evaluate_rsi_divergence(
+        self, symbol: str, df: pd.DataFrame,
+        rsi: float, price: float, ema: float, atr: float, volume_ratio: float,
+        *, extra_context: dict | None = None,
+    ) -> Signal | None:
+        """RSI Divergence signal — research winner (Sharpe 0.83, 40% WR)."""
+        divergence = self._find_rsi_divergence(df)
+        if divergence is None:
+            return None
+
+        ctx = extra_context or {}
+
+        if divergence == "bullish" and rsi < 45:
+            strength = min(1.0, (50 - rsi) / 30 + volume_ratio * 0.1)
+            return Signal(
+                symbol=symbol, side="long", signal_type="rsi_div_bullish",
+                strength=max(0.01, strength), rsi=rsi, ema=ema, atr=atr,
+                volume_ratio=volume_ratio, price=price,
+                context={"divergence": "bullish", **ctx},
+            )
+        elif divergence == "bearish" and rsi > 55 and not self.long_only:
+            strength = min(1.0, (rsi - 50) / 30 + volume_ratio * 0.1)
+            return Signal(
+                symbol=symbol, side="short", signal_type="rsi_div_bearish",
+                strength=max(0.01, strength), rsi=rsi, ema=ema, atr=atr,
+                volume_ratio=volume_ratio, price=price,
+                context={"divergence": "bearish", **ctx},
+            )
+        return None
+
+    def _evaluate_volume_spike(
+        self, symbol: str, latest, price: float, ema: float, atr: float,
+        rsi: float, volume_ratio: float,
+        *, extra_context: dict | None = None,
+    ) -> Signal | None:
+        """Volume Spike Reversal — hammer/shooting star on 3x volume."""
+        if volume_ratio < 3.0:
+            return None
+
+        ctx = extra_context or {}
+        body = abs(latest["close"] - latest["open"])
+        full_range = latest["high"] - latest["low"]
+        if full_range <= 0:
+            return None
+
+        lower_wick = min(latest["open"], latest["close"]) - latest["low"]
+        upper_wick = latest["high"] - max(latest["open"], latest["close"])
+
+        # Hammer (bullish): long lower wick, close in upper half
+        is_hammer = (lower_wick > 2 * body and
+                     latest["close"] >= (latest["high"] + latest["low"]) / 2)
+        # Shooting star (bearish): long upper wick, close in lower half
+        is_star = (upper_wick > 2 * body and
+                   latest["close"] <= (latest["high"] + latest["low"]) / 2)
+
+        strength = min(1.0, volume_ratio / 5.0)
+        strength = max(0.01, strength)
+
+        if is_hammer:
+            return Signal(
+                symbol=symbol, side="long", signal_type="vol_spike_hammer",
+                strength=strength, rsi=rsi, ema=ema, atr=atr,
+                volume_ratio=volume_ratio, price=price,
+                context={"pattern": "hammer", "vol_ratio": round(volume_ratio, 2), **ctx},
+            )
+        elif is_star and not self.long_only:
+            return Signal(
+                symbol=symbol, side="short", signal_type="vol_spike_star",
+                strength=strength, rsi=rsi, ema=ema, atr=atr,
+                volume_ratio=volume_ratio, price=price,
+                context={"pattern": "shooting_star", "vol_ratio": round(volume_ratio, 2), **ctx},
+            )
+        return None
 
     def _evaluate_vwap_reversion(
         self, symbol: str, df: pd.DataFrame,
