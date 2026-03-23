@@ -138,6 +138,14 @@ class Trader:
                 return
 
             logger.warning("Found %d orphan positions on Alpaca, closing: %s", len(orphans), orphans)
+            # Cancel any pending orders that might block closing
+            try:
+                for order in self.trading_client.get_orders():
+                    if order.symbol in orphans:
+                        self.trading_client.cancel_order_by_id(order.id)
+                        logger.info("Cancelled pending order for orphan %s", order.symbol)
+            except Exception as e:
+                logger.error("Failed to cancel orphan orders: %s", e)
             for sym in orphans:
                 try:
                     self.trading_client.close_position(sym)
