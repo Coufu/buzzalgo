@@ -170,6 +170,9 @@ class Trader:
     def _reset_daily_state(self):
         today = datetime.now(ET).date().isoformat()
         if self.today != today:
+            # Log previous day's summary before resetting (covers weekends/after-hours)
+            if self.today and not self._daily_summary_logged:
+                self._log_daily_summary()
             account = self.trading_client.get_account()
             self.starting_equity = float(account.equity)
             self.daily_pnl = 0.0
