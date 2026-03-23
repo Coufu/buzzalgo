@@ -1,7 +1,7 @@
 {
-    "version": "4.0.0",
-    "name": "SPY Regime Gate + Concentrated v4.0",
-    "description": "SPY regime gate (only trade when SPY uptrend) + concentrated 20-name universe, MACD/Keltner/liquidity-grab signals",
+    "version": "5.0.0",
+    "name": "Higher-Low Momentum + Close Window v5.0",
+    "description": "Primary signal: higher-low price structure (5 bars). Close-30 window (15-16 ET). No SPY gate — ultra-selective per-symbol filters instead. min_ema_slope 0.1, RSI 50-65, ADX>25, vol>2.0.",
     "parameters": {
         "long_only": true,
         "keltner_mult": 3.0,
@@ -26,7 +26,7 @@
         "take_profit_atr_mult": 2.0,
         "time_exit_minutes": 120,
         "time_exit_max_profit_atr": 0.5,
-        "trade_start_hour": 14,
+        "trade_start_hour": 15,
         "trade_end_hour": 16,
         "sentiment_enabled": true,
         "sentiment_weight": 0.3,
@@ -35,8 +35,13 @@
         "multi_timeframe_enabled": true,
         "daily_trend_period": 5,
         "max_positions_per_sector": 2,
-        "market_regime_gate": true,
-        "market_regime_symbol": "SPY"
+        "market_regime_gate": false,
+        "market_regime_symbol": "SPY",
+        "spy_gate_min_slope": 0,
+        "higher_low_bars": 5,
+        "higher_low_rsi_min": 50,
+        "higher_low_rsi_max": 65,
+        "min_ema_slope_entry": 0.05
     },
     "universe": [
         "SPY", "QQQ", "IWM", "DIA", "XLK", "TQQQ",

@@ -1,19 +1,19 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 4.0.0
-Name: SPY Regime Gate + Concentrated Universe
-Description: v4.0.0: MAJOR PIVOT — kill criteria triggered on v3.0.0
-             (Sharpe -5.99, 5% WR, 322 trades mixed window).
-             All signal-type changes failed (MACD, Keltner, EMA pullback,
-             Donchian, momentum continuation, RSI mean reversion).
-             Root cause: individual stock signals fire in bear markets.
-             New approach: META-level market regime gate using SPY.
-             Only trade when SPY EMA slope > 0 (broad market bullish).
-             In bearish markets, generate ZERO signals — don't fight the tape.
-             Universe concentrated to 20 most liquid names to reduce noise.
-             Existing MACD/Keltner/liquidity-grab signals retained but only
-             fire when market context is favorable.
+Version: 5.0.0
+Name: Higher-Low Momentum + Close Window
+Description: v5.0.0: MAJOR PIVOT — kill criteria triggered on v4.0.0
+             (Sharpe -5.57, 4.9% WR, 327 trades mixed window).
+             All indicator-based signals failed (MACD, Keltner, RSI, EMA,
+             Donchian, BB). Root cause: crossover/oscillator signals lag
+             in choppy markets and fire false entries.
+             New approach: PRICE STRUCTURE as primary signal.
+             Higher-Low Momentum: 3 consecutive higher lows = micro-uptrend
+             forming. Pure price action, not indicator-dependent.
+             Close-30 window only (15-16 ET) — the ONLY profitable time bucket.
+             Relaxed SPY gate (slope > -0.05) to allow more signal flow.
+             MACD/Keltner/liquidity-grab retained as secondary signals.
 
 Claude Code may freely modify:
   - Keltner channel multiplier
@@ -109,7 +109,7 @@ class Signal:
 class Strategy:
     """Keltner channel breakout strategy, long-only, afternoon session."""
 
-    VERSION = "4.0.0"
+    VERSION = "5.0.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
@@ -148,9 +148,16 @@ class Strategy:
         # Time-of-day filter: only trade during these hours (ET)
         self.trade_start_hour = params.get("trade_start_hour", 12)
         self.trade_end_hour = params.get("trade_end_hour", 16)
-        # Market regime gate: only trade when SPY trend is bullish
+        # Market regime gate: only trade when SPY trend is not strongly bearish
         self.market_regime_gate = params.get("market_regime_gate", True)
         self.market_regime_symbol = params.get("market_regime_symbol", "SPY")
+        self.spy_gate_min_slope = params.get("spy_gate_min_slope", -0.05)
+        # Higher-low momentum: number of consecutive higher lows required
+        self.higher_low_bars = params.get("higher_low_bars", 4)
+        self.higher_low_rsi_min = params.get("higher_low_rsi_min", 40)
+        self.higher_low_rsi_max = params.get("higher_low_rsi_max", 70)
+        # Minimum EMA slope for any entry (per-symbol trend strength gate)
+        self.min_ema_slope_entry = params.get("min_ema_slope_entry", 0.0)
         # Sentiment
         self.sentiment_enabled = params.get("sentiment_enabled", False)
         self.sentiment_weight = params.get("sentiment_weight", 0.3)
@@ -166,10 +173,12 @@ class Strategy:
         # Legacy params for compatibility (used by backtest/risk)
         self.rsi_oversold = params.get("rsi_oversold", 25)
         self.rsi_overbought = params.get("rsi_overbought", 75)
-        logger.info("Strategy v%s initialized: Keltner(%.1f) MACD(%d,%d,%d) RSI(%d) EMA(%d) ADX(%d) hours=%d-%d long_only=%s",
-                     self.VERSION, self.keltner_mult, self.macd_fast, self.macd_slow, self.macd_signal,
+        logger.info("Strategy v%s initialized: HigherLow(%d) Keltner(%.1f) MACD(%d,%d,%d) RSI(%d) EMA(%d) ADX(%d) hours=%d-%d spy_gate=%.2f long_only=%s",
+                     self.VERSION, self.higher_low_bars, self.keltner_mult,
+                     self.macd_fast, self.macd_slow, self.macd_signal,
                      self.rsi_period, self.ema_period, self.adx_period,
-                     self.trade_start_hour, self.trade_end_hour, self.long_only)
+                     self.trade_start_hour, self.trade_end_hour,
+                     self.spy_gate_min_slope, self.long_only)
 
     @staticmethod
     def _load_params(mode: str = "equity") -> dict:
@@ -279,7 +288,7 @@ class Strategy:
 
     def generate_signals(self, bars: dict[str, pd.DataFrame], open_symbols: list[str] | None = None) -> list[Signal]:
         """Generate trading signals for all symbols."""
-        # Market regime gate: check SPY trend before generating any signals
+        # Market regime gate: optionally block all signals when SPY is bearish
         if self.market_regime_gate and self.market_regime_symbol in bars:
             spy_df = bars[self.market_regime_symbol]
             min_bars = max(self.ema_period, self.atr_period) + 5
@@ -287,11 +296,9 @@ class Strategy:
                 spy_df = self.compute_indicators(spy_df)
                 spy_latest = spy_df.iloc[-1]
                 spy_ema_slope = spy_latest["ema_slope"] if not pd.isna(spy_latest.get("ema_slope")) else 0
-                spy_price = spy_latest["close"]
-                spy_ema = spy_latest["ema"]
-                # Don't trade if SPY trend is declining — long-only can't profit in bear markets
-                if spy_ema_slope <= 0:
-                    logger.debug("Market regime gate: SPY EMA slope %.4f <= 0, skipping all signals", spy_ema_slope)
+                if spy_ema_slope <= self.spy_gate_min_slope:
+                    logger.debug("Market regime gate: SPY EMA slope %.4f <= %.4f, skipping all signals",
+                                 spy_ema_slope, self.spy_gate_min_slope)
                     return []
 
         # Load sentiment scores if enabled
@@ -362,6 +369,10 @@ class Strategy:
             if self.min_adx_entry > 0 and adx < self.min_adx_entry:
                 continue
 
+            # Per-symbol EMA slope minimum: require individual stock uptrend
+            if self.min_ema_slope_entry > 0 and ema_slope < self.min_ema_slope_entry:
+                continue
+
             # Sector correlation filter
             sector = SECTOR_MAP.get(symbol, "Other")
             if sector != "ETF" and sector_counts.get(sector, 0) >= self.max_positions_per_sector:
@@ -379,9 +390,15 @@ class Strategy:
                 "daily_trend": daily_trend,
             }
 
-            # Primary signal: MACD crossover (long only when long_only=True)
-            signal = None
-            if macd is not None and macd_sig is not None and prev_macd is not None and prev_macd_sig is not None:
+            # Primary signal: Higher-Low Momentum (price structure)
+            # Fires in both bullish and mild-bear regimes
+            signal = self._evaluate_higher_low_momentum(
+                symbol, df, rsi, price, ema, atr, volume_ratio,
+                ema_slope=ema_slope, extra_context=extra_context,
+            )
+
+            # Secondary signal: MACD crossover (long only when long_only=True)
+            if signal is None and macd is not None and macd_sig is not None and prev_macd is not None and prev_macd_sig is not None:
                 signal = self._evaluate_entry(
                     symbol, rsi, price, ema, atr, volume_ratio,
                     macd, macd_sig, prev_macd, prev_macd_sig, macd_hist,
@@ -419,6 +436,67 @@ class Strategy:
             signals = sorted(signals, key=lambda s: s.strength, reverse=True)[:3]
 
         return signals
+
+    def _evaluate_higher_low_momentum(
+        self, symbol: str, df: pd.DataFrame,
+        rsi: float, price: float, ema: float, atr: float, volume_ratio: float,
+        *, ema_slope: float = 0, extra_context: dict | None = None,
+    ) -> Signal | None:
+        """Higher-Low Momentum: 3+ consecutive higher lows = micro-uptrend.
+
+        Fundamentally different from crossover/oscillator signals — based on
+        pure price structure. Catches forming uptrends before indicators confirm.
+        Combined with EMA trend filter and RSI momentum window.
+        """
+        n = self.higher_low_bars
+        if len(df) < n + 1:
+            return None
+
+        # Check for N-1 consecutive higher lows in the last N bars
+        lows = df["low"].iloc[-n:].values
+        for i in range(1, len(lows)):
+            if lows[i] <= lows[i - 1]:
+                return None
+
+        # Price must be above EMA (uptrend context)
+        if price <= ema:
+            return None
+
+        # RSI momentum filter: not overbought, has room to run
+        if rsi < self.higher_low_rsi_min or rsi > self.higher_low_rsi_max:
+            return None
+
+        # EMA slope must be non-negative (at least flat trend)
+        if ema_slope < 0:
+            return None
+
+        # Strength: magnitude of higher-low progression + volume
+        low_progression = (lows[-1] - lows[0]) / atr if atr > 0 else 0
+        strength = min(1.0, low_progression * 0.5 + volume_ratio * 0.2)
+        strength = max(0.1, strength)
+
+        if self.sentiment_enabled:
+            sent = (extra_context or {}).get("sentiment_score", 0)
+            if sent != 0:
+                strength *= (1.0 + sent * self.sentiment_weight)
+                strength = max(0.01, min(1.0, strength))
+
+        return Signal(
+            symbol=symbol,
+            side="long",
+            signal_type="higher_low_momentum",
+            strength=strength,
+            rsi=rsi,
+            ema=ema,
+            atr=atr,
+            volume_ratio=volume_ratio,
+            price=price,
+            context={
+                "higher_lows": [round(float(l), 4) for l in lows],
+                "low_progression_atr": round(low_progression, 3),
+                **(extra_context or {}),
+            },
+        )
 
     def _evaluate_keltner_breakout(
         self, symbol: str, rsi: float, price: float,
