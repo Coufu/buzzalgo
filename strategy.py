@@ -1,19 +1,19 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 5.0.0
-Name: Higher-Low Momentum + Close Window
-Description: v5.0.0: MAJOR PIVOT — kill criteria triggered on v4.0.0
-             (Sharpe -5.57, 4.9% WR, 327 trades mixed window).
-             All indicator-based signals failed (MACD, Keltner, RSI, EMA,
-             Donchian, BB). Root cause: crossover/oscillator signals lag
-             in choppy markets and fire false entries.
-             New approach: PRICE STRUCTURE as primary signal.
-             Higher-Low Momentum: 3 consecutive higher lows = micro-uptrend
-             forming. Pure price action, not indicator-dependent.
-             Close-30 window only (15-16 ET) — the ONLY profitable time bucket.
-             Relaxed SPY gate (slope > -0.05) to allow more signal flow.
-             MACD/Keltner/liquidity-grab retained as secondary signals.
+Version: 6.0.0
+Name: VWAP Reversion + Secondary Trend Signals
+Description: v6.0.0: MAJOR PIVOT — kill criteria triggered on v5.0.0.
+             All prior approaches were TREND-FOLLOWING (MACD, Keltner,
+             higher-low, EMA pullback, Donchian). All fail in bear/choppy
+             markets because trends reverse before stops are hit.
+             New approach: MEAN-REVERSION TO VWAP as primary signal.
+             Buy when price crosses above intraday VWAP after being below
+             it — profits from reversion to fair value, not trend continuation.
+             Works in all market regimes (bull, bear, choppy).
+             Wider trading window (10-16 ET) for VWAP to be meaningful.
+             Trend filters (ADX, EMA slope) relaxed for mean-reversion.
+             Higher-low/MACD/Keltner/liquidity-grab retained as secondary.
 
 Claude Code may freely modify:
   - Keltner channel multiplier
@@ -107,9 +107,9 @@ class Signal:
 
 
 class Strategy:
-    """Keltner channel breakout strategy, long-only, afternoon session."""
+    """VWAP reversion strategy, long-only, with trend-following secondaries."""
 
-    VERSION = "5.0.0"
+    VERSION = "6.0.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
@@ -158,6 +158,10 @@ class Strategy:
         self.higher_low_rsi_max = params.get("higher_low_rsi_max", 70)
         # Minimum EMA slope for any entry (per-symbol trend strength gate)
         self.min_ema_slope_entry = params.get("min_ema_slope_entry", 0.0)
+        # VWAP reversion parameters
+        self.vwap_enabled = params.get("vwap_enabled", True)
+        self.vwap_rsi_max = params.get("vwap_rsi_max", 65)
+        self.vwap_min_bars_into_day = params.get("vwap_min_bars_into_day", 6)  # 30 min of 5-min bars
         # Sentiment
         self.sentiment_enabled = params.get("sentiment_enabled", False)
         self.sentiment_weight = params.get("sentiment_weight", 0.3)
@@ -173,12 +177,11 @@ class Strategy:
         # Legacy params for compatibility (used by backtest/risk)
         self.rsi_oversold = params.get("rsi_oversold", 25)
         self.rsi_overbought = params.get("rsi_overbought", 75)
-        logger.info("Strategy v%s initialized: HigherLow(%d) Keltner(%.1f) MACD(%d,%d,%d) RSI(%d) EMA(%d) ADX(%d) hours=%d-%d spy_gate=%.2f long_only=%s",
-                     self.VERSION, self.higher_low_bars, self.keltner_mult,
-                     self.macd_fast, self.macd_slow, self.macd_signal,
-                     self.rsi_period, self.ema_period, self.adx_period,
-                     self.trade_start_hour, self.trade_end_hour,
-                     self.spy_gate_min_slope, self.long_only)
+        logger.info("Strategy v%s initialized: VWAP=%s HigherLow(%d) Keltner(%.1f) MACD(%d,%d,%d) RSI(%d) EMA(%d) hours=%d-%d long_only=%s",
+                     self.VERSION, self.vwap_enabled, self.higher_low_bars,
+                     self.keltner_mult, self.macd_fast, self.macd_slow,
+                     self.macd_signal, self.rsi_period, self.ema_period,
+                     self.trade_start_hour, self.trade_end_hour, self.long_only)
 
     @staticmethod
     def _load_params(mode: str = "equity") -> dict:
@@ -235,6 +238,17 @@ class Strategy:
         # Donchian channel for liquidity grab detection (previous bar's levels)
         df["dc_high"] = df["high"].rolling(window=20).max().shift(1)
         df["dc_low"] = df["low"].rolling(window=20).min().shift(1)
+        # VWAP: volume-weighted average price, reset daily
+        if self.vwap_enabled:
+            try:
+                tp = (df["high"] + df["low"] + df["close"]) / 3
+                tp_vol = tp * df["volume"]
+                dates = df.index.date
+                df["vwap"] = tp_vol.groupby(dates).cumsum() / df["volume"].groupby(dates).cumsum()
+            except Exception:
+                df["vwap"] = np.nan
+        else:
+            df["vwap"] = np.nan
         return df
 
     def _classify_regime(self, adx: float, ema_slope: float) -> str:
@@ -390,12 +404,19 @@ class Strategy:
                 "daily_trend": daily_trend,
             }
 
-            # Primary signal: Higher-Low Momentum (price structure)
-            # Fires in both bullish and mild-bear regimes
-            signal = self._evaluate_higher_low_momentum(
+            # Primary signal: VWAP Reversion (mean-reversion to fair value)
+            # Works in all regimes — stocks oscillate around VWAP intraday
+            signal = self._evaluate_vwap_reversion(
                 symbol, df, rsi, price, ema, atr, volume_ratio,
-                ema_slope=ema_slope, extra_context=extra_context,
+                extra_context=extra_context,
             )
+
+            # Secondary signal: Higher-Low Momentum (price structure)
+            if signal is None:
+                signal = self._evaluate_higher_low_momentum(
+                    symbol, df, rsi, price, ema, atr, volume_ratio,
+                    ema_slope=ema_slope, extra_context=extra_context,
+                )
 
             # Secondary signal: MACD crossover (long only when long_only=True)
             if signal is None and macd is not None and macd_sig is not None and prev_macd is not None and prev_macd_sig is not None:
@@ -494,6 +515,74 @@ class Strategy:
             context={
                 "higher_lows": [round(float(l), 4) for l in lows],
                 "low_progression_atr": round(low_progression, 3),
+                **(extra_context or {}),
+            },
+        )
+
+    def _evaluate_vwap_reversion(
+        self, symbol: str, df: pd.DataFrame,
+        rsi: float, price: float, ema: float, atr: float, volume_ratio: float,
+        *, extra_context: dict | None = None,
+    ) -> Signal | None:
+        """VWAP Reversion: buy when price crosses above VWAP after being below.
+
+        Mean-reversion to intraday fair value. Works in all market regimes
+        because stocks oscillate around VWAP regardless of macro direction.
+        Fundamentally different from all prior trend-following signals.
+        """
+        if not self.vwap_enabled or len(df) < self.vwap_min_bars_into_day:
+            return None
+
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        vwap = latest.get("vwap")
+        prev_vwap = prev.get("vwap")
+        if vwap is None or prev_vwap is None or pd.isna(vwap) or pd.isna(prev_vwap):
+            return None
+
+        prev_close = prev["close"]
+        # Price must have just crossed above VWAP (was below, now above)
+        if not (prev_close < prev_vwap and price > vwap):
+            return None
+
+        # Require meaningful prior deviation: prev close was at least 0.5 ATR below VWAP
+        if atr > 0 and (prev_vwap - prev_close) < 0.5 * atr:
+            return None
+
+        # RSI filter: not overbought — room to continue upward
+        if rsi > self.vwap_rsi_max:
+            return None
+
+        # Bounce confirmation: current bar is bullish (close > open)
+        if price <= latest["open"]:
+            return None
+
+        # Strength: proximity to VWAP (tighter = stronger) + volume
+        distance_atr = abs(price - vwap) / atr if atr > 0 else 0
+        strength = min(1.0, volume_ratio * 0.3 + max(0, 1.0 - distance_atr) * 0.4)
+        strength = max(0.1, strength)
+
+        if self.sentiment_enabled:
+            sent = (extra_context or {}).get("sentiment_score", 0)
+            if sent != 0:
+                strength *= (1.0 + sent * self.sentiment_weight)
+                strength = max(0.01, min(1.0, strength))
+
+        return Signal(
+            symbol=symbol,
+            side="long",
+            signal_type="vwap_reversion_long",
+            strength=strength,
+            rsi=rsi,
+            ema=ema,
+            atr=atr,
+            volume_ratio=volume_ratio,
+            price=price,
+            context={
+                "vwap": round(float(vwap), 4),
+                "prev_close_vs_vwap": round(float(prev_close - prev_vwap), 4),
+                "price_vs_vwap": round(float(price - vwap), 4),
                 **(extra_context or {}),
             },
         )
