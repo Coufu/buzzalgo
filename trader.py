@@ -93,6 +93,7 @@ class Trader:
 
         self.strategy = Strategy(mode="equity")
         self.crypto_strategy = Strategy(mode="crypto")
+        self.swing_strategy = Strategy(mode="swing")
         self.running = True
         self.circuit_breaker_triggered = False
         self.daily_pnl = 0.0
@@ -103,6 +104,7 @@ class Trader:
         self._daily_summary_logged = False
         self._pending_order_symbols: set[str] = set()
         self._trades_today = 0
+        self._swing_checked_today = False
 
         db.init_db()
         self._reconcile_positions()
@@ -180,6 +182,7 @@ class Trader:
             self._daily_summary_logged = False
             self._pending_order_symbols.clear()
             self._trades_today = 0
+            self._swing_checked_today = False
             self._reconcile_positions()
             self.today = today
             logger.info("New trading day: %s | Equity: $%.2f", today, self.starting_equity)
@@ -191,6 +194,7 @@ class Trader:
             if mtime > self.last_strategy_reload:
                 self.strategy.reload_params()
                 self.crypto_strategy.reload_params()
+                self.swing_strategy.reload_params()
                 self.last_strategy_reload = mtime
                 logger.info("Strategy reloaded from strategy.json")
         except FileNotFoundError:
@@ -235,6 +239,44 @@ class Trader:
         fetched = len(result)
         if fetched < len(symbols):
             logger.warning("Fetched crypto bars for %d/%d symbols", fetched, len(symbols))
+        return result
+
+    def _fetch_daily_bars(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
+        """Fetch recent daily bars for swing trading (no resampling needed)."""
+        end = datetime.now(ET)
+        start = end - timedelta(days=130)  # ~90 trading days with weekends buffer
+
+        request = StockBarsRequest(
+            symbol_or_symbols=symbols,
+            timeframe=TimeFrame.Day,
+            start=start,
+            end=end,
+            feed=DataFeed.IEX,
+        )
+        barset = self.data_client.get_stock_bars(request)
+
+        result = {}
+        for symbol in symbols:
+            if symbol in barset.data:
+                bars = barset.data[symbol]
+                rows = []
+                for bar in bars:
+                    rows.append({
+                        "timestamp": bar.timestamp,
+                        "open": float(bar.open),
+                        "high": float(bar.high),
+                        "low": float(bar.low),
+                        "close": float(bar.close),
+                        "volume": float(bar.volume),
+                    })
+                if rows:
+                    df = pd.DataFrame(rows)
+                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    df = df.set_index("timestamp")
+                    result[symbol] = df.tail(90)
+        fetched = len(result)
+        if fetched < len(symbols):
+            logger.warning("Fetched daily bars for %d/%d symbols", fetched, len(symbols))
         return result
 
     def _parse_barset(self, barset, symbols: list[str]) -> dict[str, pd.DataFrame]:
@@ -448,16 +490,20 @@ class Trader:
             pnl_pct = 0.0
 
         # Submit closing order
-        close_side = OrderSide.SELL if side == "long" else OrderSide.BUY
-        tif = TimeInForce.GTC if is_crypto_symbol(symbol) else TimeInForce.DAY
         try:
-            order_request = MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=close_side,
-                time_in_force=tif,
-            )
-            self.trading_client.submit_order(order_request)
+            if is_crypto_symbol(symbol):
+                # Use close_position for crypto to avoid qty rounding mismatches
+                alpaca_sym = symbol.replace("/", "")
+                self.trading_client.close_position(alpaca_sym)
+            else:
+                close_side = OrderSide.SELL if side == "long" else OrderSide.BUY
+                order_request = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=close_side,
+                    time_in_force=TimeInForce.DAY,
+                )
+                self.trading_client.submit_order(order_request)
             logger.info(
                 "POSITION CLOSED: %s %s | P&L: $%.2f (%.2f%%) | Reason: %s",
                 side.upper(), symbol, pnl, pnl_pct, reason,
@@ -591,6 +637,23 @@ class Trader:
                     bars = self._fetch_historical_bars(self.strategy.universe)
                     equity_signals = self.strategy.generate_signals(bars, open_symbols=open_syms)
                     all_signals.extend(equity_signals)
+
+                # Swing signals — once per day at 10am ET after open settles
+                if market_open and not self.circuit_breaker_triggered and not self._swing_checked_today:
+                    now_et = datetime.now(ET)
+                    if now_et.hour >= 10:
+                        self._swing_checked_today = True
+                        if self.swing_strategy.universe:
+                            try:
+                                daily_bars = self._fetch_daily_bars(self.swing_strategy.universe)
+                                swing_signals = self.swing_strategy.generate_swing_signals(
+                                    daily_bars, open_symbols=open_syms,
+                                )
+                                all_signals.extend(swing_signals)
+                                if swing_signals:
+                                    logger.info("Generated %d swing signals", len(swing_signals))
+                            except Exception as e:
+                                logger.error("Swing signal generation failed: %s", e)
 
                 # Crypto signals — 24/7
                 if self.crypto_strategy.universe:

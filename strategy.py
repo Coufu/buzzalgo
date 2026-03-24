@@ -173,6 +173,11 @@ class Strategy:
         self.max_positions_per_sector = params.get("max_positions_per_sector", 2)
         # Universe
         self.universe = params.get("universe", ["SPY", "QQQ", "IWM"])
+        # Swing-specific params (only used when mode="swing")
+        self._swing_breakout_period = params.get("weekly_breakout_period", 20)
+        self._swing_support_lookback = params.get("support_lookback", 50)
+        self._swing_ema_fast = params.get("ema_fast", 10)
+        self._swing_ema_slow = params.get("ema_slow", 50)
         # Legacy params for compatibility (used by backtest/risk)
         self.rsi_oversold = params.get("rsi_oversold", 25)
         self.rsi_overbought = params.get("rsi_overbought", 75)
@@ -194,6 +199,9 @@ class Strategy:
             if mode == "crypto" and "crypto" in data:
                 crypto = data["crypto"]
                 return {**crypto.get("parameters", {}), "universe": crypto.get("universe", [])}
+            if mode == "swing" and "swing" in data:
+                swing = data["swing"]
+                return {**swing.get("parameters", {}), "universe": swing.get("universe", [])}
             params = {**data.get("parameters", {}), "universe": data.get("universe", [])}
             if "signal_weights" in data:
                 params["signal_weights"] = data["signal_weights"]
@@ -1028,6 +1036,274 @@ class Strategy:
             )
 
         return None
+
+    # ------------------------------------------------------------------
+    # Swing trading signals (mode="swing", daily bars)
+    # ------------------------------------------------------------------
+
+    def generate_swing_signals(self, bars: dict[str, pd.DataFrame], open_symbols: list[str] | None = None) -> list[Signal]:
+        """Generate swing trading signals from daily bars.
+
+        Only fires when self.mode == "swing". Three long-only signals:
+        1. Weekly Breakout — price closes above highest close of last N days
+        2. Support Bounce — price near support with RSI oversold + bounce
+        3. EMA Crossover (Daily) — fast EMA crosses above slow EMA in trend
+        """
+        if self.mode != "swing":
+            return []
+
+        # Load swing-specific params (with sane defaults)
+        weekly_breakout_period = getattr(self, "_swing_breakout_period", 20)
+        support_lookback = getattr(self, "_swing_support_lookback", 50)
+        ema_fast_period = getattr(self, "_swing_ema_fast", 10)
+        ema_slow_period = getattr(self, "_swing_ema_slow", 50)
+
+        # Sector counts for correlation filter
+        sector_counts: dict[str, int] = {}
+        if open_symbols:
+            for sym in open_symbols:
+                sector = SECTOR_MAP.get(sym, "Other")
+                sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
+        signals = []
+        for symbol, df in bars.items():
+            if symbol not in self.universe:
+                continue
+
+            min_bars = max(support_lookback, ema_slow_period, self.volume_lookback) + 5
+            if len(df) < min_bars:
+                continue
+
+            # Compute core indicators
+            df = self._compute_swing_indicators(df, ema_fast_period, ema_slow_period)
+            latest = df.iloc[-1]
+            prev = df.iloc[-2]
+
+            if pd.isna(latest["rsi"]) or pd.isna(latest["atr"]):
+                continue
+
+            rsi = latest["rsi"]
+            atr = latest["atr"]
+            price = latest["close"]
+            volume_ratio = latest["volume_ratio"] if not pd.isna(latest["volume_ratio"]) else 0
+            adx = latest["adx"] if not pd.isna(latest.get("adx")) else 0
+            ema_fast = latest["ema_fast"]
+            ema_slow = latest["ema_slow"]
+
+            # Sector correlation filter
+            sector = SECTOR_MAP.get(symbol, "Other")
+            if sector != "ETF" and sector_counts.get(sector, 0) >= self.max_positions_per_sector:
+                continue
+
+            ctx = {
+                "mode": "swing",
+                "adx": round(adx, 2),
+                "rsi": round(rsi, 2),
+                "volume_ratio": round(volume_ratio, 2),
+            }
+
+            signal = None
+
+            # Signal 1: Weekly Breakout
+            if signal is None:
+                signal = self._swing_weekly_breakout(
+                    symbol, df, price, rsi, atr, volume_ratio,
+                    ema_fast, weekly_breakout_period, ctx,
+                )
+
+            # Signal 2: Support Bounce
+            if signal is None:
+                signal = self._swing_support_bounce(
+                    symbol, df, price, rsi, atr, volume_ratio,
+                    ema_fast, support_lookback, prev, ctx,
+                )
+
+            # Signal 3: EMA Crossover (Daily)
+            if signal is None:
+                signal = self._swing_ema_crossover(
+                    symbol, df, price, rsi, atr, volume_ratio,
+                    ema_fast, ema_slow, adx, prev, ctx,
+                )
+
+            if signal is not None:
+                signals.append(signal)
+
+        # Cap swing signals per cycle
+        if len(signals) > 3:
+            signals = sorted(signals, key=lambda s: s.strength, reverse=True)[:3]
+
+        return signals
+
+    def _compute_swing_indicators(self, df: pd.DataFrame, ema_fast_period: int, ema_slow_period: int) -> pd.DataFrame:
+        """Compute indicators for swing trading on daily bars."""
+        df = df.copy()
+        df["rsi"] = ta.rsi(df["close"], length=self.rsi_period)
+        df["ema_fast"] = ta.ema(df["close"], length=ema_fast_period)
+        df["ema_slow"] = ta.ema(df["close"], length=ema_slow_period)
+        df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=self.atr_period)
+        df["vol_avg"] = df["volume"].rolling(window=self.volume_lookback).mean()
+        df["volume_ratio"] = df["volume"] / df["vol_avg"]
+        try:
+            adx_df = ta.adx(df["high"], df["low"], df["close"], length=self.adx_period)
+            adx_col = f"ADX_{self.adx_period}"
+            if adx_df is not None and adx_col in adx_df.columns:
+                df["adx"] = adx_df[adx_col]
+            else:
+                df["adx"] = np.nan
+        except Exception:
+            df["adx"] = np.nan
+        return df
+
+    def _swing_weekly_breakout(
+        self, symbol: str, df: pd.DataFrame,
+        price: float, rsi: float, atr: float, volume_ratio: float,
+        ema_fast: float, breakout_period: int, ctx: dict,
+    ) -> Signal | None:
+        """Weekly Breakout: price closes above highest close of last N days.
+
+        Confirms with volume > 1.2x avg and RSI 50-65 (momentum, not overbought).
+        """
+        if len(df) < breakout_period + 1:
+            return None
+
+        # Highest close in the lookback (excluding current bar)
+        highest_close = df["close"].iloc[-(breakout_period + 1):-1].max()
+
+        if price <= highest_close:
+            return None
+
+        # Volume confirmation
+        if volume_ratio < self.volume_multiplier:
+            return None
+
+        # RSI momentum band: 50-65 (not overbought, has momentum)
+        if rsi < 50 or rsi > 65:
+            return None
+
+        strength = min(1.0, (price - highest_close) / atr * 0.3 + volume_ratio * 0.2)
+        strength = max(0.1, strength)
+
+        return Signal(
+            symbol=symbol,
+            side="long",
+            signal_type="swing_weekly_breakout",
+            strength=strength,
+            rsi=rsi,
+            ema=ema_fast,
+            atr=atr,
+            volume_ratio=volume_ratio,
+            price=price,
+            context={
+                "highest_close": round(float(highest_close), 2),
+                "breakout_pct": round((price - highest_close) / highest_close * 100, 2),
+                **ctx,
+            },
+        )
+
+    def _swing_support_bounce(
+        self, symbol: str, df: pd.DataFrame,
+        price: float, rsi: float, atr: float, volume_ratio: float,
+        ema_fast: float, support_lookback: int, prev, ctx: dict,
+    ) -> Signal | None:
+        """Support Bounce: price near lowest low with RSI oversold + bounce confirmation.
+
+        Price within 0.5 ATR of the lowest low, RSI < 35, current bar closes above previous.
+        """
+        if len(df) < support_lookback + 1:
+            return None
+
+        # Lowest low in lookback (excluding current bar)
+        lowest_low = df["low"].iloc[-(support_lookback + 1):-1].min()
+
+        # Price must be within 0.5 ATR of support
+        if atr <= 0:
+            return None
+        distance = price - lowest_low
+        if distance > 0.5 * atr or distance < 0:
+            return None
+
+        # RSI oversold
+        rsi_oversold = getattr(self, "rsi_oversold", 35)
+        if rsi >= rsi_oversold:
+            return None
+
+        # Bounce confirmation: current close > previous close
+        prev_close = prev["close"]
+        if price <= prev_close:
+            return None
+
+        strength = min(1.0, (rsi_oversold - rsi) / 30 * 0.5 + volume_ratio * 0.2)
+        strength = max(0.1, strength)
+
+        return Signal(
+            symbol=symbol,
+            side="long",
+            signal_type="swing_support_bounce",
+            strength=strength,
+            rsi=rsi,
+            ema=ema_fast,
+            atr=atr,
+            volume_ratio=volume_ratio,
+            price=price,
+            context={
+                "support_level": round(float(lowest_low), 2),
+                "distance_atr": round(distance / atr, 3),
+                **ctx,
+            },
+        )
+
+    def _swing_ema_crossover(
+        self, symbol: str, df: pd.DataFrame,
+        price: float, rsi: float, atr: float, volume_ratio: float,
+        ema_fast: float, ema_slow: float, adx: float,
+        prev, ctx: dict,
+    ) -> Signal | None:
+        """EMA Crossover (Daily): fast EMA crosses above slow EMA in trending market.
+
+        ADX > 20 confirms trend, volume confirmation required.
+        """
+        if pd.isna(ema_fast) or pd.isna(ema_slow):
+            return None
+
+        prev_ema_fast = prev.get("ema_fast")
+        prev_ema_slow = prev.get("ema_slow")
+        if prev_ema_fast is None or prev_ema_slow is None:
+            return None
+        if pd.isna(prev_ema_fast) or pd.isna(prev_ema_slow):
+            return None
+
+        # Crossover: was below, now above
+        if not (prev_ema_fast <= prev_ema_slow and ema_fast > ema_slow):
+            return None
+
+        # ADX trending threshold
+        adx_threshold = getattr(self, "adx_trending", 20)
+        if adx < adx_threshold:
+            return None
+
+        # Volume confirmation
+        if volume_ratio < self.volume_multiplier:
+            return None
+
+        strength = min(1.0, adx / 50 * 0.4 + volume_ratio * 0.2)
+        strength = max(0.1, strength)
+
+        return Signal(
+            symbol=symbol,
+            side="long",
+            signal_type="swing_ema_crossover",
+            strength=strength,
+            rsi=rsi,
+            ema=ema_fast,
+            atr=atr,
+            volume_ratio=volume_ratio,
+            price=price,
+            context={
+                "ema_fast": round(float(ema_fast), 2),
+                "ema_slow": round(float(ema_slow), 2),
+                **ctx,
+            },
+        )
 
     def should_exit(self, trade: dict, current_price: float, current_atr: float) -> tuple[bool, str]:
         """Check if an open trade should be exited based on strategy logic.

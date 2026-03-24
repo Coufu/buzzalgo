@@ -52,9 +52,26 @@
         "atr_contraction_enabled": true
     },
     "universe": [
-        "SPY", "QQQ", "IWM", "DIA", "XLK", "TQQQ",
-        "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA",
-        "AMD", "AVGO", "JPM", "V", "UNH", "LLY", "CRM"
+        "SPY",
+        "QQQ",
+        "IWM",
+        "DIA",
+        "XLK",
+        "TQQQ",
+        "AAPL",
+        "MSFT",
+        "AMZN",
+        "NVDA",
+        "GOOGL",
+        "META",
+        "TSLA",
+        "AMD",
+        "AVGO",
+        "JPM",
+        "V",
+        "UNH",
+        "LLY",
+        "CRM"
     ],
     "kill_criteria": {
         "min_trades": 50,
@@ -107,10 +124,61 @@
             "max_positions_per_sector": 5
         },
         "universe": [
-            "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD",
-            "DOGE/USD", "LINK/USD", "LTC/USD", "UNI/USD",
-            "XRP/USD", "BCH/USD", "DOT/USD", "AAVE/USD",
-            "SHIB/USD", "GRT/USD", "SUSHI/USD", "BAT/USD", "CRV/USD"
+            "BTC/USD",
+            "ETH/USD",
+            "SOL/USD",
+            "AVAX/USD",
+            "DOGE/USD",
+            "LINK/USD",
+            "LTC/USD",
+            "UNI/USD",
+            "XRP/USD",
+            "BCH/USD",
+            "DOT/USD",
+            "AAVE/USD",
+            "SHIB/USD",
+            "GRT/USD",
+            "SUSHI/USD",
+            "BAT/USD",
+            "CRV/USD"
         ]
-    }
+    },
+    "swing": {
+        "parameters": {
+            "weekly_breakout_period": 20,
+            "support_lookback": 50,
+            "ema_fast": 10,
+            "ema_slow": 50,
+            "rsi_period": 14,
+            "rsi_oversold": 35,
+            "rsi_overbought": 65,
+            "atr_period": 14,
+            "volume_multiplier": 1.2,
+            "volume_lookback": 20,
+            "adx_period": 14,
+            "adx_trending_threshold": 20,
+            "time_exit_minutes": 0,
+            "max_positions_per_sector": 1
+        },
+        "universe": [
+            "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN",
+            "TSLA", "AMD", "AVGO", "NFLX", "JPM", "V", "MA", "CRM",
+            "LLY", "UNH", "COST", "HD"
+        ]
+    },
+    "signal_weights": {
+        "vwap_reversion_long": 0.0,
+        "vwap_revert_long": 0.0,
+        "vwap_revert_short": 0.0,
+        "orb_long": 0.0,
+        "orb_short": 0.0,
+        "rsi_div_bullish": 0.3121,
+        "rsi_div_bearish": 0.3121,
+        "vol_spike_hammer": 0.1879,
+        "vol_spike_star": 0.1879,
+        "dual_ema_long": 0.0,
+        "dual_ema_short": 0.0,
+        "dual_ema_trend": 0.0
+    },
+    "signal_weights_updated_at": "2026-03-24T15:29:18.540476-04:00"
 }
