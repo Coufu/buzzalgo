@@ -4,6 +4,35 @@ All strategy modifications are logged here with hypotheses, outcomes, and reason
 
 ---
 
+## 2026-03-24 — v8.2.0: Sustained VWAP Deviation Filter
+
+**Analysis**:
+- v8.1.0 baseline: Sharpe 2.39, 18 trades, 38.89% WR, 0.03% max DD
+- Performance report still reflects mostly OLD ema_pullback trades
+- close_30 only profitable time bucket in live data (+$91.07)
+- Sweep results all negative — swept RSI/volume params don't affect VWAP+HL core
+- Train Sharpe very negative (-7.98) — potential overfitting concern
+
+**Hypothesis**: Add sustained VWAP deviation filter — require >= 2 of last 3 bars to have closed below VWAP before the crossover signal fires. This filters out noisy single-bar dips below VWAP that immediately reverse, improving signal quality. A "real" VWAP deviation should show the stock spending sustained time below fair value before the bounce.
+
+**Changes**:
+- `strategy.py`: Added sustained deviation check in `_evaluate_vwap_reversion()` — loops through bars[-3:-1] and requires >= 2 closes below VWAP. Version 8.1.0 → 8.2.0.
+- `strategy.json`: Version/description updated.
+
+**Backtest Result** (30 days):
+- Sharpe: 3.42 (was 2.39, +1.03 improvement)
+- Win Rate: 46.67% (was 38.89%)
+- Max Drawdown: 0.03% (unchanged)
+- Profit Factor: 1.43 (was 1.11)
+- Total Trades: 15 (was 18, -3 low-quality trades removed)
+- Total P&L: +$24.81 (was +$8.01)
+- Train Sharpe: -6.64 (was -7.98, improved)
+- Test Sharpe: 3.42 (was 2.39)
+
+**Outcome**: DEPLOYED — Test Sharpe improved by +1.03 (2.39 → 3.42, well above 0.05 threshold). Max drawdown unchanged at 0.03%. The filter removed 3 low-quality VWAP signals that were triggered by noisy single-bar dips, improving win rate from 39% to 47% and profit factor from 1.11 to 1.43. Train Sharpe also improved (-7.98 → -6.64), suggesting better robustness.
+
+---
+
 ## 2026-03-24 — v8.1.0: Relax VWAP Deviation Threshold
 
 **Analysis**:

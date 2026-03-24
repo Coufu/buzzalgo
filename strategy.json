@@ -1,7 +1,7 @@
 {
-    "version": "8.1.0",
-    "name": "Close-30 Concentration v8.1",
-    "description": "v8.1.0: Relax VWAP deviation from 0.5 to 0.3 ATR. More reversion signals fire while retaining RSI<35 + volume 2.0x quality filters. Core: VWAP+HL(3)+ATR contraction. Hours 10-16.",
+    "version": "8.2.0",
+    "name": "Close-30 Concentration v8.2",
+    "description": "v8.2.0: Add sustained VWAP deviation filter (>=2 of last 3 bars below VWAP). Filters noisy single-bar dips. Win rate 39%->47%, Sharpe 2.39->3.42. Core: VWAP+HL(3)+ATR contraction. Hours 10-16.",
     "parameters": {
         "long_only": true,
         "keltner_mult": 3.0,

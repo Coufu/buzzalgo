@@ -1,12 +1,11 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 8.1.0
+Version: 8.2.0
 Name: Close-30 Concentration
-Description: v8.1.0: Relax VWAP deviation from 0.5 to 0.3 ATR.
-             More VWAP reversion signals fire on smaller deviations from
-             fair value. RSI<35 + volume 2.0x quality filters retained.
-             Trade count up from 10 to 16 with Sharpe improvement.
+Description: v8.2.0: Add sustained VWAP deviation filter — require >= 2 of
+             last 3 bars below VWAP before crossover signal fires.
+             Filters noisy single-bar dips. Win rate 39%→47%, Sharpe 2.39→3.42.
              Core signals: VWAP reversion + HL(3) + ATR contraction.
 
 Claude Code may freely modify:
@@ -103,7 +102,7 @@ class Signal:
 class Strategy:
     """Concentrated signal strategy: VWAP reversion + HL(3), noisy signals disabled."""
 
-    VERSION = "8.1.0"
+    VERSION = "8.2.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
@@ -745,6 +744,18 @@ class Strategy:
         # Price must have just crossed above VWAP (was below, now above)
         if not (prev_close < prev_vwap and price > vwap):
             return None
+
+        # Sustained deviation: require >= 2 of last 3 bars closed below VWAP
+        # Filters out noisy single-bar dips that immediately reverse
+        if len(df) >= 4:
+            bars_below = 0
+            for i in range(-3, 0):
+                bar = df.iloc[i]
+                bar_vwap = bar.get("vwap")
+                if bar_vwap is not None and not pd.isna(bar_vwap) and bar["close"] < bar_vwap:
+                    bars_below += 1
+            if bars_below < 2:
+                return None
 
         # Require meaningful prior deviation: prev close was at least N ATR below VWAP
         if atr > 0 and (prev_vwap - prev_close) < self.vwap_min_deviation_atr * atr:
