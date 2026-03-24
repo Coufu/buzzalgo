@@ -104,7 +104,14 @@ def _backtest_strategy(
     cutoff = datetime.now(ET) - __import__("datetime").timedelta(days=window_days + 5)
     trimmed = {}
     for symbol, df in bars.items():
-        mask = df.index >= pd.Timestamp(cutoff, tz=df.index.tz if df.index.tz else ET)
+        cutoff_ts = pd.Timestamp(cutoff)
+        if df.index.tz and cutoff_ts.tz is None:
+            cutoff_ts = cutoff_ts.tz_localize(df.index.tz)
+        elif df.index.tz and cutoff_ts.tz is not None:
+            cutoff_ts = cutoff_ts.tz_convert(df.index.tz)
+        elif not df.index.tz and cutoff_ts.tz is not None:
+            cutoff_ts = cutoff_ts.tz_localize(None)
+        mask = df.index >= cutoff_ts
         sub = df[mask]
         if len(sub) >= 30:  # need enough bars for indicators
             trimmed[symbol] = sub
@@ -210,6 +217,107 @@ def run_tournament(
             if signal_weights[sig_type] > 0:
                 signal_weights[sig_type] = round(signal_weights[sig_type] / active_total, 4)
 
+    # --- Walk-Forward Validation ---
+    # Train on first 67% of 90d data, test on last 33%
+    logger.info("\n=== Walk-Forward Validation (train 67%% / test 33%%) ===")
+    wf_results = {}
+    for key, strategy_cls in STRATEGIES.items():
+        strategy = strategy_cls()
+        train_bars = {}
+        test_bars = {}
+        for symbol, df in bars.items():
+            split_idx = int(len(df) * 0.67)
+            train_bars[symbol] = df.iloc[:split_idx]
+            test_bars[symbol] = df.iloc[split_idx:]
+
+        try:
+            train_result = simulate(strategy, train_bars, portfolio_value=100_000)
+            test_result = simulate(strategy, test_bars, portfolio_value=100_000)
+            wf_results[key] = {
+                "train_sharpe": train_result.sharpe_ratio,
+                "test_sharpe": test_result.sharpe_ratio,
+                "overfit_ratio": (train_result.sharpe_ratio - test_result.sharpe_ratio) / max(abs(train_result.sharpe_ratio), 0.01),
+            }
+            logger.info("  %s: train=%.2f test=%.2f overfit=%.1f%%",
+                        key, train_result.sharpe_ratio, test_result.sharpe_ratio,
+                        wf_results[key]["overfit_ratio"] * 100)
+        except Exception as e:
+            logger.error("  %s walk-forward failed: %s", key, e)
+            wf_results[key] = {"train_sharpe": 0, "test_sharpe": 0, "overfit_ratio": 0}
+
+    # --- Monte Carlo Simulation ---
+    # Shuffle trade P&Ls 500 times to get confidence intervals
+    logger.info("\n=== Monte Carlo Simulation (500 trials) ===")
+    mc_results = {}
+    for key, strategy_cls in STRATEGIES.items():
+        strategy = strategy_cls()
+        try:
+            result = simulate(strategy, bars, portfolio_value=100_000)
+            if result.trades:
+                pnls = [t.pnl for t in result.trades]
+                mc_sharpes = []
+                for _ in range(500):
+                    shuffled = np.random.permutation(pnls)
+                    cumulative = np.cumsum(shuffled)
+                    daily_chunks = [cumulative[i:i+26] for i in range(0, len(cumulative), 26)]  # ~26 bars/day
+                    if len(daily_chunks) > 1:
+                        daily_returns = []
+                        for chunk in daily_chunks:
+                            if len(chunk) > 0:
+                                daily_returns.append(chunk[-1] - (chunk[0] if len(chunk) > 1 else 0))
+                        if daily_returns and np.std(daily_returns) > 0:
+                            mc_sharpes.append(np.mean(daily_returns) / np.std(daily_returns) * np.sqrt(252))
+                if mc_sharpes:
+                    mc_results[key] = {
+                        "median_sharpe": float(np.median(mc_sharpes)),
+                        "p5_sharpe": float(np.percentile(mc_sharpes, 5)),
+                        "p95_sharpe": float(np.percentile(mc_sharpes, 95)),
+                        "pct_positive": float(np.mean([s > 0 for s in mc_sharpes]) * 100),
+                    }
+                    logger.info("  %s: median=%.2f  5th=%.2f  95th=%.2f  %%positive=%.0f%%",
+                                key, mc_results[key]["median_sharpe"],
+                                mc_results[key]["p5_sharpe"], mc_results[key]["p95_sharpe"],
+                                mc_results[key]["pct_positive"])
+                else:
+                    mc_results[key] = {"median_sharpe": 0, "p5_sharpe": 0, "p95_sharpe": 0, "pct_positive": 0}
+            else:
+                mc_results[key] = {"median_sharpe": 0, "p5_sharpe": 0, "p95_sharpe": 0, "pct_positive": 0}
+        except Exception as e:
+            logger.error("  %s Monte Carlo failed: %s", key, e)
+            mc_results[key] = {"median_sharpe": 0, "p5_sharpe": 0, "p95_sharpe": 0, "pct_positive": 0}
+
+    # --- Strategy Correlation ---
+    # Compute daily P&L correlation between strategies
+    logger.info("\n=== Strategy Correlation Matrix ===")
+    daily_pnls = {}
+    for key, strategy_cls in STRATEGIES.items():
+        strategy = strategy_cls()
+        try:
+            result = simulate(strategy, bars, portfolio_value=100_000)
+            if result.trades:
+                trade_pnls = {}
+                for t in result.trades:
+                    day = t.exit_time[:10] if t.exit_time else "unknown"
+                    trade_pnls[day] = trade_pnls.get(day, 0) + t.pnl
+                daily_pnls[key] = trade_pnls
+        except Exception:
+            pass
+
+    correlation_matrix = {}
+    strategy_keys = list(daily_pnls.keys())
+    if len(strategy_keys) >= 2:
+        all_days = sorted(set().union(*(set(d.keys()) for d in daily_pnls.values())))
+        pnl_matrix = np.array([
+            [daily_pnls[k].get(day, 0) for day in all_days]
+            for k in strategy_keys
+        ])
+        corr = np.corrcoef(pnl_matrix)
+        for i, k1 in enumerate(strategy_keys):
+            for j, k2 in enumerate(strategy_keys):
+                if i < j:
+                    correlation_matrix[f"{k1} vs {k2}"] = round(float(corr[i, j]), 3)
+                    logger.info("  %s vs %s: %.3f", k1, k2, corr[i, j])
+
     # Print summary
     print()
     print("=" * 60)
@@ -234,6 +342,35 @@ def run_tournament(
         status = "ACTIVE" if w > 0 else "disabled"
         print(f"  {sig_type:<28} {w:.4f}  ({status})")
     print()
+
+    # Walk-forward
+    if wf_results:
+        print("Walk-Forward Validation:")
+        for key in STRATEGIES:
+            wf = wf_results.get(key, {})
+            print(f"  {key:<18} train={wf.get('train_sharpe', 0):>7.2f}  test={wf.get('test_sharpe', 0):>7.2f}  overfit={wf.get('overfit_ratio', 0):>6.0%}")
+        print()
+
+    # Monte Carlo
+    if mc_results:
+        print("Monte Carlo (500 trials):")
+        for key in STRATEGIES:
+            mc = mc_results.get(key, {})
+            print(f"  {key:<18} median={mc.get('median_sharpe', 0):>7.2f}  5th={mc.get('p5_sharpe', 0):>7.2f}  95th={mc.get('p95_sharpe', 0):>7.2f}  %positive={mc.get('pct_positive', 0):>4.0f}%")
+        print()
+
+    # Correlation
+    if correlation_matrix:
+        print("Strategy Correlations:")
+        for pair, corr in sorted(correlation_matrix.items()):
+            label = "HIGH" if abs(corr) > 0.5 else "low"
+            print(f"  {pair:<30} {corr:>6.3f}  ({label})")
+        print()
+
+    # Store for Slack summary
+    run_tournament._wf_results = wf_results
+    run_tournament._mc_results = mc_results
+    run_tournament._correlation = correlation_matrix
 
     # Write to strategy.json
     if not dry_run:
@@ -298,6 +435,24 @@ def _post_slack_summary(
     active_count = sum(1 for v in signal_weights.values() if v > 0)
     total_count = len(signal_weights)
     lines.append(f"\n{active_count}/{total_count} signal types active")
+
+    # Walk-forward & Monte Carlo highlights
+    if hasattr(run_tournament, '_wf_results'):
+        wf = run_tournament._wf_results
+        mc = run_tournament._mc_results
+        corr = run_tournament._correlation
+        lines.append("\n*Validation:*")
+        for key in STRATEGIES:
+            wf_data = wf.get(key, {})
+            mc_data = mc.get(key, {})
+            test_s = wf_data.get("test_sharpe", 0)
+            pct_pos = mc_data.get("pct_positive", 0)
+            if test_s != 0 or pct_pos != 0:
+                lines.append(f"  {key}: walk-fwd test={test_s:.2f} | MC {pct_pos:.0f}% positive")
+        if corr:
+            high_corr = {k: v for k, v in corr.items() if abs(v) > 0.5}
+            if high_corr:
+                lines.append(f"\n:warning: High correlation: {', '.join(f'{k}={v:.2f}' for k, v in high_corr.items())}")
 
     _notify_slack("\n".join(lines))
 
