@@ -664,11 +664,58 @@ def send_daily_journal():
     starting = dp["starting_equity"] if dp and dp["starting_equity"] else None
     daily_return = dp["daily_return_pct"] if dp else 0
 
-    pnl_emoji = ":chart_with_upwards_trend:" if total_pnl >= 0 else ":chart_with_downwards_trend:"
+    # Day rating with personality
     date_str = datetime.now(ET).strftime("%A, %b %d")
+    if total_pnl > 200:
+        header = f":rocket: *GREAT DAY — {date_str}*"
+        verdict = ":fire: Crushed it today."
+    elif total_pnl > 50:
+        header = f":chart_with_upwards_trend: *Good day — {date_str}*"
+        verdict = ":muscle: Solid gains. Keep it rolling."
+    elif total_pnl > 0:
+        header = f":white_check_mark: *Green day — {date_str}*"
+        verdict = "Small win. Every green day counts."
+    elif total_pnl == 0 and not closed:
+        header = f":zzz: *Quiet day — {date_str}*"
+        verdict = "No trades today. Patience is a position."
+    elif total_pnl > -50:
+        header = f":yellow_circle: *Flat day — {date_str}*"
+        verdict = "Minor scratch. Nothing to worry about."
+    elif total_pnl > -200:
+        header = f":chart_with_downwards_trend: *Red day — {date_str}*"
+        verdict = "Rough one. The strategy will adapt."
+    else:
+        header = f":rotating_light: *Bad day — {date_str}*"
+        verdict = "Ouch. Time to review what went wrong."
 
-    msg = f"{pnl_emoji} *Daily Journal — {date_str}*\n"
+    # Check for streaks
+    streak_msg = ""
+    if week_rows:
+        consecutive_green = 0
+        consecutive_red = 0
+        for r in week_rows:
+            pnl = r.get("daily_pnl") or 0
+            if pnl > 0:
+                consecutive_green += 1
+            else:
+                break
+        for r in week_rows:
+            pnl = r.get("daily_pnl") or 0
+            if pnl < 0:
+                consecutive_red += 1
+            else:
+                break
+        if consecutive_green >= 3:
+            streak_msg = f":hot_streak: {consecutive_green}-day win streak!"
+        elif consecutive_red >= 3:
+            streak_msg = f":cold_face: {consecutive_red}-day losing streak."
+
+    msg = f"{header}\n"
     msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"*{verdict}*"
+    if streak_msg:
+        msg += f" {streak_msg}"
+    msg += "\n\n"
 
     # Today's headline
     msg += f"*P&L:* `${total_pnl:+.2f}` ({daily_return:+.2f}%)\n"
