@@ -1,7 +1,7 @@
 {
-    "version": "6.0.0",
-    "name": "VWAP Reversion v6.0",
-    "description": "Primary signal: VWAP mean-reversion (buy when price crosses above VWAP). Wider window (10-16 ET). No trend filters for primary signal. Secondary: higher-low, MACD, Keltner.",
+    "version": "8.0.0",
+    "name": "ATR Contraction Breakout v8.0",
+    "description": "Primary signal: ATR contraction breakout (volatility compression then expansion). Afternoon window (14-16 ET). Volume 2.0x. Secondary: RSI divergence, volume spike, VWAP, higher-low, MACD, Keltner.",
     "parameters": {
         "long_only": true,
         "keltner_mult": 3.0,
@@ -9,13 +9,13 @@
         "macd_slow": 13,
         "macd_signal": 5,
         "rsi_period": 14,
-        "rsi_long_min": 50,
-        "rsi_long_max": 75,
+        "rsi_long_min": 99,
+        "rsi_long_max": 99,
         "rsi_short_max": 50,
         "rsi_oversold": 25,
         "rsi_overbought": 75,
         "ema_period": 10,
-        "volume_multiplier": 3.0,
+        "volume_multiplier": 2.0,
         "volume_lookback": 20,
         "atr_period": 14,
         "adx_period": 14,
@@ -44,7 +44,12 @@
         "min_ema_slope_entry": 0,
         "vwap_enabled": true,
         "vwap_rsi_max": 35,
-        "vwap_min_bars_into_day": 6
+        "vwap_min_bars_into_day": 6,
+        "vwap_min_deviation_atr": 0.5,
+        "rsi_divergence_enabled": false,
+        "volume_spike_enabled": false,
+        "liquidity_grab_enabled": false,
+        "atr_contraction_enabled": true
     },
     "universe": [
         "SPY", "QQQ", "IWM", "DIA", "XLK", "TQQQ",

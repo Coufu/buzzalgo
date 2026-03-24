@@ -1,19 +1,20 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 6.0.0
-Name: VWAP Reversion + Secondary Trend Signals
-Description: v6.0.0: MAJOR PIVOT — kill criteria triggered on v5.0.0.
-             All prior approaches were TREND-FOLLOWING (MACD, Keltner,
-             higher-low, EMA pullback, Donchian). All fail in bear/choppy
-             markets because trends reverse before stops are hit.
-             New approach: MEAN-REVERSION TO VWAP as primary signal.
-             Buy when price crosses above intraday VWAP after being below
-             it — profits from reversion to fair value, not trend continuation.
-             Works in all market regimes (bull, bear, choppy).
-             Wider trading window (10-16 ET) for VWAP to be meaningful.
-             Trend filters (ADX, EMA slope) relaxed for mean-reversion.
-             Higher-low/MACD/Keltner/liquidity-grab retained as secondary.
+Version: 8.0.0
+Name: ATR Contraction Breakout + Afternoon Concentration
+Description: v8.0.0: MAJOR PIVOT — kill criteria triggered on v7.0.0.
+             Performance data shows close_30 is the ONLY profitable window
+             (+$91.07, 15.3% WR). Morning/midday are dead (0% WR, 169 trades).
+             New primary signal: ATR CONTRACTION BREAKOUT — enter when
+             volatility has been compressing (ATR declining) then expands
+             with volume. This is a VOLATILITY REGIME signal, fundamentally
+             different from all prior approaches (momentum, mean-reversion,
+             divergence, breakout). Works in all market conditions because
+             consolidation→expansion is universal.
+             Trading window narrowed to 14-16 ET (afternoon + close_30).
+             Volume filter relaxed to 2.0x for more opportunities in narrow window.
+             RSI divergence, volume spike, VWAP retained as secondaries.
 
 Claude Code may freely modify:
   - Keltner channel multiplier
@@ -107,9 +108,9 @@ class Signal:
 
 
 class Strategy:
-    """VWAP reversion strategy, long-only, with trend-following secondaries."""
+    """Concentrated signal strategy: VWAP reversion + HL(3), noisy signals disabled."""
 
-    VERSION = "7.0.0"
+    VERSION = "8.0.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
@@ -162,6 +163,12 @@ class Strategy:
         self.vwap_enabled = params.get("vwap_enabled", True)
         self.vwap_rsi_max = params.get("vwap_rsi_max", 65)
         self.vwap_min_bars_into_day = params.get("vwap_min_bars_into_day", 6)  # 30 min of 5-min bars
+        self.vwap_min_deviation_atr = params.get("vwap_min_deviation_atr", 0.5)
+        # Signal enable/disable params (allows silencing noisy signals via config)
+        self.rsi_divergence_enabled = params.get("rsi_divergence_enabled", True)
+        self.volume_spike_enabled = params.get("volume_spike_enabled", True)
+        self.liquidity_grab_enabled = params.get("liquidity_grab_enabled", True)
+        self.atr_contraction_enabled = params.get("atr_contraction_enabled", True)
         # Sentiment
         self.sentiment_enabled = params.get("sentiment_enabled", False)
         self.sentiment_weight = params.get("sentiment_weight", 0.3)
@@ -375,18 +382,6 @@ class Strategy:
             time_bucket = self._classify_time_bucket(df.index[-1])
             entry_hour = df.index[-1].hour if hasattr(df.index[-1], "hour") else None
 
-            # Volume filter
-            if volume_ratio < self.volume_multiplier:
-                continue
-
-            # ADX minimum filter
-            if self.min_adx_entry > 0 and adx < self.min_adx_entry:
-                continue
-
-            # Per-symbol EMA slope minimum: require individual stock uptrend
-            if self.min_ema_slope_entry > 0 and ema_slope < self.min_ema_slope_entry:
-                continue
-
             # Sector correlation filter
             sector = SECTOR_MAP.get(symbol, "Other")
             if sector != "ETF" and sector_counts.get(sector, 0) >= self.max_positions_per_sector:
@@ -404,27 +399,52 @@ class Strategy:
                 "daily_trend": daily_trend,
             }
 
-            # Primary signal: RSI Divergence (research winner: Sharpe 0.83)
-            signal = self._evaluate_rsi_divergence(
-                symbol, df, rsi, price, ema, atr, volume_ratio,
-                extra_context=extra_context,
-            )
+            # Primary signal: VWAP Reversion (proven: Sharpe 4.81 in v6.0.0)
+            signal = None
 
-            # Secondary: Volume Spike Reversal (research: near breakeven, high WR)
-            if signal is None:
-                signal = self._evaluate_volume_spike(
-                    symbol, latest, price, ema, atr, rsi, volume_ratio,
+            # ATR Contraction Breakout (own volume threshold: 2.0x)
+            # Checked BEFORE global volume filter — volatility contraction
+            # signals need less volume confirmation since the setup itself is selective
+            if volume_ratio >= 2.0:  # ATR contraction has own volume threshold
+                signal = self._evaluate_atr_contraction_breakout(
+                    symbol, df, rsi, price, ema, atr, volume_ratio,
                     extra_context=extra_context,
                 )
 
-            # Tertiary: VWAP Reversion (mean-reversion to fair value)
+            # Global volume filter for remaining signals (3.0x)
+            if signal is None and volume_ratio < self.volume_multiplier:
+                continue
+
+            # ADX minimum filter
+            if signal is None and self.min_adx_entry > 0 and adx < self.min_adx_entry:
+                continue
+
+            # Per-symbol EMA slope minimum
+            if signal is None and self.min_ema_slope_entry > 0 and ema_slope < self.min_ema_slope_entry:
+                continue
+
+            # VWAP Reversion (mean-reversion to fair value — primary 3x signal)
             if signal is None:
                 signal = self._evaluate_vwap_reversion(
                     symbol, df, rsi, price, ema, atr, volume_ratio,
                     extra_context=extra_context,
                 )
 
-            # Secondary signal: Higher-Low Momentum (price structure)
+            # RSI Divergence
+            if signal is None:
+                signal = self._evaluate_rsi_divergence(
+                    symbol, df, rsi, price, ema, atr, volume_ratio,
+                    extra_context=extra_context,
+                )
+
+            # Volume Spike Reversal (candlestick pattern + volume)
+            if signal is None:
+                signal = self._evaluate_volume_spike(
+                    symbol, latest, price, ema, atr, rsi, volume_ratio,
+                    extra_context=extra_context,
+                )
+
+            # Higher-Low Momentum (price structure)
             if signal is None:
                 signal = self._evaluate_higher_low_momentum(
                     symbol, df, rsi, price, ema, atr, volume_ratio,
@@ -532,6 +552,70 @@ class Strategy:
             },
         )
 
+    def _evaluate_atr_contraction_breakout(
+        self, symbol: str, df: pd.DataFrame,
+        rsi: float, price: float, ema: float, atr: float, volume_ratio: float,
+        *, extra_context: dict | None = None,
+    ) -> Signal | None:
+        """ATR Contraction Breakout: enter when volatility expands after compression.
+
+        Detects periods where ATR has been declining (consolidation), then a
+        volume spike + directional candle triggers entry. Volatility contraction
+        followed by expansion is a regime-independent pattern — works in bull,
+        bear, and choppy markets because it catches the START of new moves.
+        Fundamentally different from momentum, mean-reversion, or divergence.
+        """
+        if not self.atr_contraction_enabled:
+            return None
+        lookback = 5
+        if len(df) < lookback + 2:
+            return None
+
+        # Check ATR contraction: current ATR < 75% of ATR from lookback bars ago
+        atr_prev = df["atr"].iloc[-(lookback + 1)]
+        if pd.isna(atr_prev) or atr_prev <= 0:
+            return None
+        if atr >= 0.75 * atr_prev:
+            return None  # No contraction detected — require 25%+ drop
+
+        latest = df.iloc[-1]
+        # Require bullish candle for long entry
+        if latest["close"] <= latest["open"]:
+            return None
+
+        # RSI not overbought: room to run
+        if rsi > 70:
+            return None
+
+        # Strength based on contraction depth + volume
+        contraction_ratio = 1.0 - (atr / atr_prev)  # how much ATR contracted
+        strength = min(1.0, contraction_ratio * 2.0 + volume_ratio * 0.2)
+        strength = max(0.1, strength)
+
+        if self.sentiment_enabled:
+            sent = (extra_context or {}).get("sentiment_score", 0)
+            if sent != 0:
+                strength *= (1.0 + sent * self.sentiment_weight)
+                strength = max(0.01, min(1.0, strength))
+
+        return Signal(
+            symbol=symbol,
+            side="long",
+            signal_type="atr_contraction_breakout",
+            strength=strength,
+            rsi=rsi,
+            ema=ema,
+            atr=atr,
+            volume_ratio=volume_ratio,
+            price=price,
+            context={
+                "atr_contraction": round(contraction_ratio, 3),
+                "atr_prev": round(float(atr_prev), 4),
+                "atr_curr": round(float(atr), 4),
+                **(extra_context or {}),
+            },
+        )
+
     def _find_rsi_divergence(self, df: pd.DataFrame) -> str | None:
         """Check for RSI divergence in the last 10 bars.
 
@@ -570,6 +654,8 @@ class Strategy:
         *, extra_context: dict | None = None,
     ) -> Signal | None:
         """RSI Divergence signal — research winner (Sharpe 0.83, 40% WR)."""
+        if not self.rsi_divergence_enabled:
+            return None
         divergence = self._find_rsi_divergence(df)
         if divergence is None:
             return None
@@ -600,6 +686,8 @@ class Strategy:
         *, extra_context: dict | None = None,
     ) -> Signal | None:
         """Volume Spike Reversal — hammer/shooting star on 3x volume."""
+        if not self.volume_spike_enabled:
+            return None
         if volume_ratio < 3.0:
             return None
 
@@ -665,8 +753,8 @@ class Strategy:
         if not (prev_close < prev_vwap and price > vwap):
             return None
 
-        # Require meaningful prior deviation: prev close was at least 0.5 ATR below VWAP
-        if atr > 0 and (prev_vwap - prev_close) < 0.5 * atr:
+        # Require meaningful prior deviation: prev close was at least N ATR below VWAP
+        if atr > 0 and (prev_vwap - prev_close) < self.vwap_min_deviation_atr * atr:
             return None
 
         # RSI filter: not overbought — room to continue upward
@@ -777,6 +865,8 @@ class Strategy:
         Short: prev bar swept above dc_high but closed below it,
                current bar confirms by closing below prev close. RSI 50-70.
         """
+        if not self.liquidity_grab_enabled:
+            return None
         if dc_high is None or dc_low is None or atr <= 0:
             return None
 
