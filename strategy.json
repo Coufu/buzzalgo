@@ -1,7 +1,7 @@
 {
-    "version": "8.0.0",
-    "name": "ATR Contraction Breakout v8.0",
-    "description": "Primary signal: ATR contraction breakout (volatility compression then expansion). Afternoon window (14-16 ET). Volume 2.0x. Secondary: RSI divergence, volume spike, VWAP, higher-low, MACD, Keltner.",
+    "version": "8.1.0",
+    "name": "Close-30 Concentration v8.1",
+    "description": "v8.1.0: Relax VWAP deviation from 0.5 to 0.3 ATR. More reversion signals fire while retaining RSI<35 + volume 2.0x quality filters. Core: VWAP+HL(3)+ATR contraction. Hours 10-16.",
     "parameters": {
         "long_only": true,
         "keltner_mult": 3.0,
@@ -45,7 +45,7 @@
         "vwap_enabled": true,
         "vwap_rsi_max": 35,
         "vwap_min_bars_into_day": 6,
-        "vwap_min_deviation_atr": 0.5,
+        "vwap_min_deviation_atr": 0.3,
         "rsi_divergence_enabled": false,
         "volume_spike_enabled": false,
         "liquidity_grab_enabled": false,

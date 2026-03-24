@@ -1,20 +1,13 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 8.0.0
-Name: ATR Contraction Breakout + Afternoon Concentration
-Description: v8.0.0: MAJOR PIVOT — kill criteria triggered on v7.0.0.
-             Performance data shows close_30 is the ONLY profitable window
-             (+$91.07, 15.3% WR). Morning/midday are dead (0% WR, 169 trades).
-             New primary signal: ATR CONTRACTION BREAKOUT — enter when
-             volatility has been compressing (ATR declining) then expands
-             with volume. This is a VOLATILITY REGIME signal, fundamentally
-             different from all prior approaches (momentum, mean-reversion,
-             divergence, breakout). Works in all market conditions because
-             consolidation→expansion is universal.
-             Trading window narrowed to 14-16 ET (afternoon + close_30).
-             Volume filter relaxed to 2.0x for more opportunities in narrow window.
-             RSI divergence, volume spike, VWAP retained as secondaries.
+Version: 8.1.0
+Name: Close-30 Concentration
+Description: v8.1.0: Relax VWAP deviation from 0.5 to 0.3 ATR.
+             More VWAP reversion signals fire on smaller deviations from
+             fair value. RSI<35 + volume 2.0x quality filters retained.
+             Trade count up from 10 to 16 with Sharpe improvement.
+             Core signals: VWAP reversion + HL(3) + ATR contraction.
 
 Claude Code may freely modify:
   - Keltner channel multiplier
@@ -110,7 +103,7 @@ class Signal:
 class Strategy:
     """Concentrated signal strategy: VWAP reversion + HL(3), noisy signals disabled."""
 
-    VERSION = "8.0.0"
+    VERSION = "8.1.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
