@@ -176,6 +176,10 @@ class Strategy:
         # Legacy params for compatibility (used by backtest/risk)
         self.rsi_oversold = params.get("rsi_oversold", 25)
         self.rsi_overbought = params.get("rsi_overbought", 75)
+        # Tournament signal weights: loaded from strategy.json "signal_weights" key.
+        # Signals with weight 0 are filtered out; others have strength multiplied.
+        # Signals not listed in signal_weights are left unmodified (weight 1.0).
+        self.signal_weights: dict[str, float] = params.get("signal_weights", {})
         logger.info("Strategy v%s initialized: VWAP=%s HigherLow(%d) Keltner(%.1f) MACD(%d,%d,%d) RSI(%d) EMA(%d) hours=%d-%d long_only=%s",
                      self.VERSION, self.vwap_enabled, self.higher_low_bars,
                      self.keltner_mult, self.macd_fast, self.macd_slow,
@@ -190,7 +194,10 @@ class Strategy:
             if mode == "crypto" and "crypto" in data:
                 crypto = data["crypto"]
                 return {**crypto.get("parameters", {}), "universe": crypto.get("universe", [])}
-            return {**data.get("parameters", {}), "universe": data.get("universe", [])}
+            params = {**data.get("parameters", {}), "universe": data.get("universe", [])}
+            if "signal_weights" in data:
+                params["signal_weights"] = data["signal_weights"]
+            return params
         return {}
 
     def reload_params(self):
@@ -476,6 +483,20 @@ class Strategy:
 
             if signal is not None:
                 signals.append(signal)
+
+        # Apply tournament signal weights from strategy.json
+        if self.signal_weights:
+            weighted = []
+            for sig in signals:
+                w = self.signal_weights.get(sig.signal_type)
+                if w is not None:
+                    if w <= 0:
+                        continue  # disabled by tournament
+                    sig.strength *= w
+                    sig.strength = max(0.01, min(1.0, sig.strength))
+                # Signals not in signal_weights pass through unmodified
+                weighted.append(sig)
+            signals = weighted
 
         # Cap signals per cycle
         if len(signals) > 3:

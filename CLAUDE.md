@@ -136,6 +136,10 @@ python sweep.py --days 60 --top 10
 python replay.py --date 2026-03-12
 python replay.py --compare proposed_params.json
 
+# Run strategy tournament (adaptive signal weights)
+python tournament.py
+python tournament.py --dry-run
+
 # Start all Docker services
 docker compose up -d --build
 ```
@@ -151,6 +155,7 @@ docker compose up -d --build
 | Improve | launchd (`com.buzzalgo.improve`) | 2am, 8am, 5pm ET Mon-Fri | Claude Code analyzes + improves strategy |
 | Scanner | launchd (`com.buzzalgo.scanner`) | 4:45pm ET Mon-Fri | Triple bottom pattern detection to Slack |
 | Sweep | launchd (`com.buzzalgo.sweep`) | 2am Sat+Sun | Parameter grid search |
+| Tournament | launchd (`com.buzzalgo.tournament`) | 3am ET Mon-Fri | Adaptive signal weighting via rolling backtests |
 | Healthcheck | launchd (`com.buzzalgo.healthcheck`) | 9am+6pm ET Mon-Fri, noon Sat+Sun | System health report to Slack |
 
 Plist templates are in `launchd/` — `setup.sh` installs them automatically.
