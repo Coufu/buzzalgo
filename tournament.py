@@ -373,59 +373,88 @@ def run_tournament(
     print(f"{'='*60}")
     for k, v in yomi_components.items():
         if k != "total":
-            print(f"  {k:<25} {v:>5.1f} / 25")
+            print(f"  {k:<25} {v:>5.1f} / 20")
     print()
 
     # --- Yomi Score (0-100) ---
-    # Measures how well the system reads and adapts to the market
+    # Game theory score: measures how well we read the market's layers
+    # Based on David Sirlin's yomi concept — reading your opponent
     logger.info("\n=== Yomi Score ===")
     yomi_components = {}
 
-    # 1. Edge Freshness (0-25): Is 30d better than 90d? Edge growing = good
+    # 1. Level Awareness (0-20): Are we operating above Level 0?
+    # Level 0 = naive pattern (breakouts, EMA crossover) — gets exploited
+    # Level 1 = counter-pattern (RSI divergence, volume spike) — exploits Level 0
+    # Level 2 = market-neutral (pairs) — sidesteps the game
+    LEVEL_MAP = {
+        "vwap": 0, "orb": 0, "dual_ema": 0,        # Level 0: naive patterns
+        "rsi_div": 1, "vol_spike": 1,                # Level 1: counter-patterns
+        "pairs": 2,                                    # Level 2: market-neutral
+    }
     active_strategies = [k for k, s in strategy_scores.items() if s > 0]
     if active_strategies:
-        freshness_scores = []
+        levels = [LEVEL_MAP.get(k, 0) for k in active_strategies]
+        avg_level = np.mean(levels)
+        # Level 0 = 0 points, Level 1 = 10, Level 2 = 20
+        level_awareness = min(20, avg_level * 10)
+    else:
+        level_awareness = 0
+    yomi_components["level_awareness"] = round(level_awareness, 1)
+    logger.info("  Active strategies at levels: %s", {k: LEVEL_MAP.get(k, 0) for k in active_strategies})
+
+    # 2. Edge Decay Detection (0-20): Is 30d Sharpe declining vs 90d?
+    # Fast decay = opponents adapting to us = bad yomi
+    # Growing edge = we're reading them, they're not reading us
+    if active_strategies:
+        decay_scores = []
         for key in active_strategies:
             s30 = results[key].get(30, {}).get("sharpe", 0)
             s90 = results[key].get(90, {}).get("sharpe", 0)
-            if s90 != 0:
-                ratio = s30 / abs(s90)
-                freshness_scores.append(min(1.0, max(0, ratio)))
-            elif s30 > 0:
-                freshness_scores.append(1.0)
+            if s90 > 0 and s30 > 0:
+                # Both positive: check if edge is growing
+                ratio = s30 / s90
+                decay_scores.append(min(1.0, max(0, ratio)))
+            elif s30 > 0 and s90 <= 0:
+                # Recently positive but historically negative: new edge found
+                decay_scores.append(1.0)
+            elif s30 <= 0:
+                # Currently losing: edge decayed
+                decay_scores.append(0.0)
             else:
-                freshness_scores.append(0.0)
-        edge_freshness = np.mean(freshness_scores) * 25
+                decay_scores.append(0.5)
+        edge_decay = np.mean(decay_scores) * 20
     else:
-        edge_freshness = 0
-    yomi_components["edge_freshness"] = round(edge_freshness, 1)
+        edge_decay = 0
+    yomi_components["edge_decay"] = round(edge_decay, 1)
 
-    # 2. Walk-Forward Integrity (0-25): Low overfit = honest edge
+    # 3. Contrarian Accuracy (0-20): Do counter-trend strategies beat trend-following?
+    # If Level 1 beats Level 0, we're correctly reading that the market punishes naive patterns
+    level0_sharpe = np.mean([results[k].get(30, {}).get("sharpe", 0) for k in STRATEGIES if LEVEL_MAP.get(k, 0) == 0]) if any(LEVEL_MAP.get(k, 0) == 0 for k in STRATEGIES) else 0
+    level1_sharpe = np.mean([results[k].get(30, {}).get("sharpe", 0) for k in STRATEGIES if LEVEL_MAP.get(k, 0) >= 1]) if any(LEVEL_MAP.get(k, 0) >= 1 for k in STRATEGIES) else 0
+
+    if level1_sharpe > level0_sharpe and level1_sharpe > 0:
+        gap = level1_sharpe - level0_sharpe
+        contrarian_accuracy = min(20, gap * 3)  # bigger gap = better reading
+    elif level1_sharpe > 0:
+        contrarian_accuracy = 10  # counter-trend works but not clearly better
+    else:
+        contrarian_accuracy = 0
+    yomi_components["contrarian_accuracy"] = round(contrarian_accuracy, 1)
+    logger.info("  Level 0 avg Sharpe: %.2f | Level 1+ avg Sharpe: %.2f", level0_sharpe, level1_sharpe)
+
+    # 4. Walk-Forward Integrity (0-20): Low overfit = not fooling ourselves
     if wf_results:
         overfit_scores = []
         for key in STRATEGIES:
             wf = wf_results.get(key, {})
             overfit = abs(wf.get("overfit_ratio", 1.0))
-            # Lower overfit = better. 0% overfit = 25 points, 100%+ = 0
             overfit_scores.append(max(0, 1.0 - overfit))
-        wf_integrity = np.mean(overfit_scores) * 25
+        wf_integrity = np.mean(overfit_scores) * 20
     else:
         wf_integrity = 0
     yomi_components["walkforward_integrity"] = round(wf_integrity, 1)
 
-    # 3. Monte Carlo Confidence (0-25): High % positive = robust edge
-    if mc_results:
-        mc_scores = []
-        for key in active_strategies:
-            mc = mc_results.get(key, {})
-            pct_pos = mc.get("pct_positive", 0) / 100
-            mc_scores.append(pct_pos)
-        mc_confidence = np.mean(mc_scores) * 25 if mc_scores else 0
-    else:
-        mc_confidence = 0
-    yomi_components["monte_carlo_confidence"] = round(mc_confidence, 1)
-
-    # 4. Diversification (0-25): Low correlation between active strategies = better
+    # 5. Diversification (0-20): Uncorrelated strategies = multiple independent reads
     if correlation_matrix and len(active_strategies) >= 2:
         corr_values = []
         for pair, c in correlation_matrix.items():
@@ -434,30 +463,31 @@ def run_tournament(
                 corr_values.append(abs(c))
         if corr_values:
             avg_corr = np.mean(corr_values)
-            diversification = (1.0 - avg_corr) * 25
+            diversification = (1.0 - avg_corr) * 20
         else:
-            diversification = 25  # no active pairs to correlate = fully diversified
+            diversification = 20
     else:
-        diversification = 12.5  # single strategy = half credit
+        diversification = 10  # single strategy = half credit
     yomi_components["diversification"] = round(diversification, 1)
 
     yomi_score = sum(yomi_components.values())
     yomi_components["total"] = round(yomi_score, 1)
 
-    logger.info("  Edge Freshness:        %.1f / 25", edge_freshness)
-    logger.info("  Walk-Forward Integrity:%.1f / 25", wf_integrity)
-    logger.info("  Monte Carlo Confidence:%.1f / 25", mc_confidence)
-    logger.info("  Diversification:       %.1f / 25", diversification)
+    logger.info("  Level Awareness:       %.1f / 20  (avg level: %.1f)", level_awareness, avg_level if active_strategies else 0)
+    logger.info("  Edge Decay:            %.1f / 20", edge_decay)
+    logger.info("  Contrarian Accuracy:   %.1f / 20  (L0=%.2f vs L1+=%.2f)", contrarian_accuracy, level0_sharpe, level1_sharpe)
+    logger.info("  Walk-Forward Integrity:%.1f / 20", wf_integrity)
+    logger.info("  Diversification:       %.1f / 20", diversification)
     logger.info("  YOMI SCORE:            %.1f / 100", yomi_score)
 
     if yomi_score >= 70:
-        yomi_label = "Strong read on the market"
+        yomi_label = "Level 2+ reading — exploiting the exploiters"
     elif yomi_score >= 50:
-        yomi_label = "Decent read, room to improve"
+        yomi_label = "Level 1 reading — trading against the crowd"
     elif yomi_score >= 30:
-        yomi_label = "Weak read, strategies may be overfitting"
+        yomi_label = "Level 0-1 — seeing patterns but getting faded"
     else:
-        yomi_label = "Poor read, needs fundamental rethink"
+        yomi_label = "Level 0 — the market is reading us"
 
     # Store for Slack summary
     run_tournament._wf_results = wf_results
@@ -544,7 +574,7 @@ def _post_slack_summary(
         else:
             yomi_emoji = ":see_no_evil:"
         lines.append(f"\n{yomi_emoji} *Yomi Score: {score:.0f}/100* — {label}")
-        lines.append(f"  Edge: {yomi.get('edge_freshness', 0):.0f} | WalkFwd: {yomi.get('walkforward_integrity', 0):.0f} | MC: {yomi.get('monte_carlo_confidence', 0):.0f} | Diversity: {yomi.get('diversification', 0):.0f}")
+        lines.append(f"  Level: {yomi.get('level_awareness', 0):.0f} | Decay: {yomi.get('edge_decay', 0):.0f} | Contrarian: {yomi.get('contrarian_accuracy', 0):.0f} | WalkFwd: {yomi.get('walkforward_integrity', 0):.0f} | Diversity: {yomi.get('diversification', 0):.0f}")
 
     # Walk-forward & Monte Carlo highlights
     if hasattr(run_tournament, '_wf_results'):
