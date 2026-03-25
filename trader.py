@@ -94,6 +94,7 @@ class Trader:
         self.strategy = Strategy(mode="equity")
         self.crypto_strategy = Strategy(mode="crypto")
         self.swing_strategy = Strategy(mode="swing")
+        self.pairs_strategy = Strategy(mode="pairs")
         self.running = True
         self.circuit_breaker_triggered = False
         self.daily_pnl = 0.0
@@ -195,6 +196,7 @@ class Trader:
                 self.strategy.reload_params()
                 self.crypto_strategy.reload_params()
                 self.swing_strategy.reload_params()
+                self.pairs_strategy.reload_params()
                 self.last_strategy_reload = mtime
                 logger.info("Strategy reloaded from strategy.json")
         except FileNotFoundError:
@@ -468,9 +470,57 @@ class Trader:
             else:
                 # Check strategy-specific exits (guard against bad ATR)
                 if atr > 0:
-                    should_exit, reason = self.strategy.should_exit(trade, current_price, atr)
-                    if should_exit:
-                        self._close_position(trade, current_price, reason)
+                    signal_type = trade.get("signal_type", "")
+                    if signal_type.startswith("pairs_"):
+                        # Pairs trades use spread-based exit logic
+                        if self._is_market_hours() and self.pairs_strategy.pairs_list:
+                            try:
+                                pairs_bars = self._fetch_historical_bars(self.pairs_strategy.universe)
+                                should_exit, reason = self.pairs_strategy.should_exit_pairs(trade, pairs_bars)
+                                if should_exit:
+                                    self._close_position(trade, current_price, reason)
+                            except Exception as e:
+                                logger.error("Pairs exit check failed for %s: %s", symbol, e)
+                    else:
+                        should_exit, reason = self.strategy.should_exit(trade, current_price, atr)
+                        if should_exit:
+                            self._close_position(trade, current_price, reason)
+
+        # Orphaned leg handling: if one leg of a pair was closed, close the other
+        self._close_orphaned_pairs_legs(open_trades, positions)
+
+    def _close_orphaned_pairs_legs(self, open_trades: list[dict], positions: dict):
+        """If one leg of a pairs trade was closed, close the orphaned partner."""
+        # Re-fetch open trades since some may have been closed above
+        with db.get_db() as conn:
+            current_open = db.get_open_trades(conn)
+
+        pairs_trades = [t for t in current_open if (t.get("signal_type") or "").startswith("pairs_")]
+        if not pairs_trades:
+            return
+
+        # Group pairs trades by their pair tag
+        pair_groups: dict[str, list[dict]] = {}
+        for t in pairs_trades:
+            ctx = t.get("signal_context") or {}
+            if isinstance(ctx, str):
+                try:
+                    ctx = json.loads(ctx)
+                except (json.JSONDecodeError, TypeError):
+                    ctx = {}
+            pair_tag = ctx.get("pair", "")
+            if pair_tag:
+                pair_groups.setdefault(pair_tag, []).append(t)
+
+        # Each pair should have exactly 2 legs; if only 1 remains, it's orphaned
+        for pair_tag, legs in pair_groups.items():
+            if len(legs) == 1:
+                orphan = legs[0]
+                symbol = orphan["symbol"]
+                if symbol in positions:
+                    current_price = float(positions[symbol].current_price)
+                    logger.warning("Orphaned pairs leg %s (pair %s), closing", symbol, pair_tag)
+                    self._close_position(orphan, current_price, "pairs_orphaned_leg")
 
     def _close_position(self, trade: dict, exit_price: float, reason: str):
         """Close a position and log the result."""
@@ -654,6 +704,24 @@ class Trader:
                                     logger.info("Generated %d swing signals", len(swing_signals))
                             except Exception as e:
                                 logger.error("Swing signal generation failed: %s", e)
+
+                # Pairs / stat-arb signals — during market hours
+                if market_open and not self.circuit_breaker_triggered and self.pairs_strategy.pairs_list:
+                    try:
+                        # Check available position slots (each pair needs 2 slots)
+                        with db.get_db() as conn:
+                            current_open = len(db.get_open_trades(conn))
+                        available_slots = risk.MAX_POSITIONS - current_open
+                        if available_slots >= 2:
+                            pairs_bars = self._fetch_historical_bars(self.pairs_strategy.universe)
+                            pairs_signals = self.pairs_strategy.generate_pairs_signals(
+                                pairs_bars, open_symbols=open_syms,
+                            )
+                            all_signals.extend(pairs_signals)
+                            if pairs_signals:
+                                logger.info("Generated %d pairs signals", len(pairs_signals))
+                    except Exception as e:
+                        logger.error("Pairs signal generation failed: %s", e)
 
                 # Crypto signals — 24/7
                 if self.crypto_strategy.universe:

@@ -51,18 +51,18 @@ SECTOR_MAP = {
     "ADBE": "Tech", "CRM": "Tech", "SMCI": "Tech", "ARM": "Tech",
     # Consumer/Internet
     "AMZN": "Consumer", "TSLA": "Consumer", "NFLX": "Consumer", "DIS": "Consumer",
-    "HD": "Consumer", "COST": "Consumer", "WMT": "Consumer", "PG": "Consumer",
+    "HD": "Consumer", "LOW": "Consumer", "COST": "Consumer", "WMT": "Consumer", "PG": "Consumer",
     "KO": "Consumer", "PEP": "Consumer", "ABNB": "Consumer", "UBER": "Consumer",
     "RBLX": "Consumer", "SHOP": "Consumer",
     # Financial
-    "JPM": "Financial", "V": "Financial", "MA": "Financial", "BAC": "Financial",
+    "JPM": "Financial", "BAC": "Financial", "V": "Financial", "MA": "Financial",
     "PYPL": "Financial", "SQ": "Financial", "SOFI": "Financial", "HOOD": "Financial",
     "COIN": "Financial", "NU": "Financial",
     # Healthcare
     "JNJ": "Healthcare", "UNH": "Healthcare", "LLY": "Healthcare", "ABBV": "Healthcare",
     "MRK": "Healthcare",
     # Energy
-    "XOM": "Energy", "ENPH": "Energy", "FSLR": "Energy",
+    "XOM": "Energy", "CVX": "Energy", "ENPH": "Energy", "FSLR": "Energy",
     # Travel/Transport
     "CCL": "Travel", "AAL": "Travel", "DAL": "Travel", "UAL": "Travel", "F": "Travel", "GM": "Travel",
     # Crypto-adjacent
@@ -174,6 +174,12 @@ class Strategy:
         self.max_positions_per_sector = params.get("max_positions_per_sector", 2)
         # Universe
         self.universe = params.get("universe", ["SPY", "QQQ", "IWM"])
+        # Pairs-specific params (only used when mode="pairs")
+        self.pairs_list: list[list[str]] = params.get("pairs_list", [])
+        self._pairs_lookback = params.get("lookback_period", 20)
+        self._pairs_zscore_entry = params.get("zscore_entry", 2.0)
+        self._pairs_zscore_exit = params.get("zscore_exit", 0.5)
+        self._pairs_correlation_min = params.get("correlation_min", 0.7)
         # Swing-specific params (only used when mode="swing")
         self._swing_breakout_period = params.get("weekly_breakout_period", 20)
         self._swing_support_lookback = params.get("support_lookback", 50)
@@ -203,6 +209,13 @@ class Strategy:
             if mode == "swing" and "swing" in data:
                 swing = data["swing"]
                 return {**swing.get("parameters", {}), "universe": swing.get("universe", [])}
+            if mode == "pairs" and "pairs" in data:
+                pairs_cfg = data["pairs"]
+                return {
+                    **pairs_cfg.get("parameters", {}),
+                    "universe": pairs_cfg.get("universe", []),
+                    "pairs_list": pairs_cfg.get("pairs", []),
+                }
             params = {**data.get("parameters", {}), "universe": data.get("universe", [])}
             if "signal_weights" in data:
                 params["signal_weights"] = data["signal_weights"]
@@ -1305,6 +1318,217 @@ class Strategy:
                 **ctx,
             },
         )
+
+    # ------------------------------------------------------------------
+    # Pairs / statistical arbitrage signals (mode="pairs", 15-min bars)
+    # ------------------------------------------------------------------
+
+    def generate_pairs_signals(
+        self, bars: dict[str, pd.DataFrame], open_symbols: list[str] | None = None,
+    ) -> list[Signal]:
+        """Generate pairs trading signals from 15-min bars.
+
+        For each configured pair (A, B):
+          1. Compute the price ratio = close_A / close_B over lookback bars.
+          2. Compute z-score of the current ratio vs its rolling mean/std.
+          3. If z-score > entry threshold: SHORT A, LONG B (ratio too high).
+          4. If z-score < -entry threshold: LONG A, SHORT B (ratio too low).
+          5. Both legs fire together so they can be executed as a pair.
+        """
+        if self.mode != "pairs":
+            return []
+
+        lookback = self._pairs_lookback
+        zscore_entry = self._pairs_zscore_entry
+        correlation_min = self._pairs_correlation_min
+        open_symbols = open_symbols or []
+
+        signals = []
+        for pair in self.pairs_list:
+            if len(pair) != 2:
+                continue
+            sym_a, sym_b = pair[0], pair[1]
+
+            if sym_a not in bars or sym_b not in bars:
+                continue
+
+            df_a = bars[sym_a]
+            df_b = bars[sym_b]
+
+            # Align timestamps between the two symbols
+            common_idx = df_a.index.intersection(df_b.index)
+            if len(common_idx) < lookback + 5:
+                continue
+
+            close_a = df_a.loc[common_idx, "close"]
+            close_b = df_b.loc[common_idx, "close"]
+
+            # Check correlation over the lookback window
+            corr = close_a.iloc[-lookback:].corr(close_b.iloc[-lookback:])
+            if pd.isna(corr) or corr < correlation_min:
+                continue
+
+            # Compute price ratio and z-score
+            ratio = close_a / close_b
+            ratio_mean = ratio.iloc[-lookback:].mean()
+            ratio_std = ratio.iloc[-lookback:].std()
+
+            if ratio_std <= 0 or pd.isna(ratio_std):
+                continue
+
+            current_ratio = ratio.iloc[-1]
+            zscore = (current_ratio - ratio_mean) / ratio_std
+
+            # No signal if z-score within entry threshold
+            if abs(zscore) < zscore_entry:
+                continue
+
+            # Compute ATR for each leg (needed for risk.py position sizing)
+            df_a_ind = self._compute_pairs_indicators(df_a)
+            df_b_ind = self._compute_pairs_indicators(df_b)
+            latest_a = df_a_ind.iloc[-1]
+            latest_b = df_b_ind.iloc[-1]
+
+            atr_a = latest_a["atr"] if not pd.isna(latest_a.get("atr")) else 0
+            atr_b = latest_b["atr"] if not pd.isna(latest_b.get("atr")) else 0
+            rsi_a = latest_a["rsi"] if not pd.isna(latest_a.get("rsi")) else 50
+            rsi_b = latest_b["rsi"] if not pd.isna(latest_b.get("rsi")) else 50
+            vol_ratio_a = latest_a["volume_ratio"] if not pd.isna(latest_a.get("volume_ratio")) else 1.0
+            vol_ratio_b = latest_b["volume_ratio"] if not pd.isna(latest_b.get("volume_ratio")) else 1.0
+
+            if atr_a <= 0 or atr_b <= 0:
+                continue
+
+            price_a = latest_a["close"]
+            price_b = latest_b["close"]
+
+            # Strength: capped abs(zscore) / 4.0
+            strength = min(1.0, abs(zscore) / 4.0)
+            strength = max(0.1, strength)
+
+            pair_tag = f"{sym_a}_{sym_b}"
+            pair_context = {
+                "pair": pair_tag,
+                "zscore": round(float(zscore), 4),
+                "correlation": round(float(corr), 4),
+                "ratio": round(float(current_ratio), 6),
+                "ratio_mean": round(float(ratio_mean), 6),
+                "ratio_std": round(float(ratio_std), 6),
+            }
+
+            if zscore > zscore_entry:
+                # Ratio too high: SHORT A (overperformer), LONG B (underperformer)
+                # Skip if either leg already has an open position
+                if sym_a not in open_symbols and sym_b not in open_symbols:
+                    signals.append(Signal(
+                        symbol=sym_b, side="long",
+                        signal_type=f"pairs_long_{pair_tag}",
+                        strength=strength, rsi=rsi_b, ema=price_b,
+                        atr=atr_b, volume_ratio=vol_ratio_b, price=price_b,
+                        context={"partner": sym_a, "leg": "long", **pair_context},
+                    ))
+                    signals.append(Signal(
+                        symbol=sym_a, side="short",
+                        signal_type=f"pairs_short_{pair_tag}",
+                        strength=strength, rsi=rsi_a, ema=price_a,
+                        atr=atr_a, volume_ratio=vol_ratio_a, price=price_a,
+                        context={"partner": sym_b, "leg": "short", **pair_context},
+                    ))
+
+            elif zscore < -zscore_entry:
+                # Ratio too low: LONG A (underperformer), SHORT B (overperformer)
+                if sym_a not in open_symbols and sym_b not in open_symbols:
+                    signals.append(Signal(
+                        symbol=sym_a, side="long",
+                        signal_type=f"pairs_long_{pair_tag}",
+                        strength=strength, rsi=rsi_a, ema=price_a,
+                        atr=atr_a, volume_ratio=vol_ratio_a, price=price_a,
+                        context={"partner": sym_b, "leg": "long", **pair_context},
+                    ))
+                    signals.append(Signal(
+                        symbol=sym_b, side="short",
+                        signal_type=f"pairs_short_{pair_tag}",
+                        strength=strength, rsi=rsi_b, ema=price_b,
+                        atr=atr_b, volume_ratio=vol_ratio_b, price=price_b,
+                        context={"partner": sym_a, "leg": "short", **pair_context},
+                    ))
+
+        # Cap to 4 signals (2 pairs) per cycle
+        if len(signals) > 4:
+            # Group by pair, sort by strength, take top 2 pairs (4 signals)
+            pair_groups: dict[str, list[Signal]] = {}
+            for sig in signals:
+                ptag = sig.context.get("pair", "")
+                pair_groups.setdefault(ptag, []).append(sig)
+            sorted_pairs = sorted(pair_groups.values(), key=lambda sigs: sigs[0].strength, reverse=True)
+            signals = []
+            for pair_sigs in sorted_pairs[:2]:
+                signals.extend(pair_sigs)
+
+        return signals
+
+    def _compute_pairs_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Compute basic indicators for pairs trading legs."""
+        df = df.copy()
+        df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=self.atr_period)
+        df["rsi"] = ta.rsi(df["close"], length=self.rsi_period)
+        df["vol_avg"] = df["volume"].rolling(window=self.volume_lookback).mean()
+        df["volume_ratio"] = df["volume"] / df["vol_avg"]
+        return df
+
+    def should_exit_pairs(
+        self, trade: dict, bars: dict[str, pd.DataFrame],
+    ) -> tuple[bool, str]:
+        """Check if a pairs trade should be exited based on spread reversion.
+
+        Returns (True, reason) if the z-score has reverted to the exit threshold.
+        Also returns True if this is an orphaned leg (partner closed).
+        """
+        signal_type = trade.get("signal_type", "")
+        if not signal_type.startswith("pairs_"):
+            return False, ""
+
+        context = trade.get("signal_context") or {}
+        if isinstance(context, str):
+            try:
+                context = json.loads(context)
+            except (json.JSONDecodeError, TypeError):
+                context = {}
+
+        pair_tag = context.get("pair", "")
+        if not pair_tag or "_" not in pair_tag:
+            return False, ""
+
+        sym_a, sym_b = pair_tag.split("_", 1)
+        if sym_a not in bars or sym_b not in bars:
+            return False, ""
+
+        df_a = bars[sym_a]
+        df_b = bars[sym_b]
+
+        # Align timestamps
+        common_idx = df_a.index.intersection(df_b.index)
+        lookback = self._pairs_lookback
+        if len(common_idx) < lookback + 1:
+            return False, ""
+
+        close_a = df_a.loc[common_idx, "close"]
+        close_b = df_b.loc[common_idx, "close"]
+
+        ratio = close_a / close_b
+        ratio_mean = ratio.iloc[-lookback:].mean()
+        ratio_std = ratio.iloc[-lookback:].std()
+
+        if ratio_std <= 0 or pd.isna(ratio_std):
+            return False, ""
+
+        current_zscore = (ratio.iloc[-1] - ratio_mean) / ratio_std
+
+        # Exit when z-score reverts to exit threshold
+        if abs(current_zscore) <= self._pairs_zscore_exit:
+            return True, "pairs_mean_reversion"
+
+        return False, ""
 
     def should_exit(self, trade: dict, current_price: float, current_atr: float) -> tuple[bool, str]:
         """Check if an open trade should be exited based on strategy logic.
