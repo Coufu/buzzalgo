@@ -4,6 +4,48 @@ All strategy modifications are logged here with hypotheses, outcomes, and reason
 
 ---
 
+## 2026-03-24 — v8.3.0: Crypto Signal Concentration
+
+**Analysis**:
+- Crypto backtest baseline: Sharpe -35.95, 2379 trades, 19.76% WR, 5.04% max DD, PnL -$4933
+- Root cause: crypto params never received the v8.0.0 signal concentration treatment
+- `volume_multiplier: 0.0` = NO volume filter, `rsi_long_min: 45` = MACD/Keltner not blocked
+- `rsi_divergence_enabled` defaulted to True (class default) — live rsi_div_bullish trades on DOGE/SUSHI lost -$33
+- Low-liquidity altcoins (GRT, SUSHI, BAT, CRV) generating noisy losing trades
+- Live performance: GRT/USD higher_low_momentum lost -$33.20 across 2 trades
+
+**Hypothesis**: Apply the same signal concentration to crypto that proved successful for equity in v8.0.0:
+1. Block MACD/Keltner via `rsi_long_min: 99, rsi_long_max: 99`
+2. Add `volume_multiplier: 2.0` (was 0.0 — no filter at all)
+3. Mirror equity VWAP+HL(3) params: `vwap_enabled: true`, `vwap_rsi_max: 35`, `higher_low_bars: 3`, `higher_low_rsi_min: 50`, `higher_low_rsi_max: 65`
+4. Explicitly disable noisy signals: `rsi_divergence_enabled: false`, `volume_spike_enabled: false`, `liquidity_grab_enabled: false`
+5. Remove low-liquidity altcoins: GRT/USD, SUSHI/USD, BAT/USD, CRV/USD
+6. Set `min_adx_entry: 0, min_ema_slope_entry: 0` (no trend gates, matching equity)
+
+**Iterations tested**:
+- 2.0x volume + concentrated signals + trimmed universe: 209 trades, 23.9% WR, **Sharpe -11.86** — best result
+- 3.0x volume + same: 182 trades, 22.0% WR, Sharpe -18.16 — higher volume filter hurts
+- Baseline (original crypto params): 2379 trades, 19.8% WR, Sharpe -35.95
+
+**Changes**:
+- `strategy.json`: Crypto params — `rsi_long_min: 99`, `rsi_long_max: 99`, `volume_multiplier: 2.0` (was 0.0), `min_adx_entry: 0`, `min_ema_slope_entry: 0`, added `vwap_enabled`, `vwap_rsi_max`, `vwap_min_deviation_atr`, `higher_low_bars`, `higher_low_rsi_min/max`, `rsi_divergence_enabled: false`, `volume_spike_enabled: false`, `liquidity_grab_enabled: false`, `atr_contraction_enabled: true`. Removed GRT/USD, SUSHI/USD, BAT/USD, CRV/USD from crypto universe. Version 8.2.0 → 8.3.0.
+- `strategy.py`: Version string + docstring updated.
+
+**Backtest Result** (30 days, crypto mode):
+- Sharpe: -11.86 (was -35.95, +24.09 improvement)
+- Win Rate: 23.92% (was 19.76%)
+- Max Drawdown: 0.46% (was 5.04%, improved by 4.58%)
+- Profit Factor: 0.38 (was 0.30)
+- Total Trades: 209 (was 2379, -91% trade reduction)
+- Total P&L: -$403.03 (was -$4933.54, -92% loss reduction)
+- Train Sharpe: -14.16 (was -32.59)
+- Test Sharpe: -11.86 (was -35.95)
+- Equity backtest: Sharpe 1.58, 11 trades, 45.5% WR, 0.02% DD (unchanged by crypto-only changes)
+
+**Outcome**: DEPLOYED — Crypto test Sharpe improved by +24.09 (-35.95 → -11.86, massively above 0.05 threshold). Max drawdown decreased from 5.04% to 0.46% (well within 2% tolerance). Trade count reduced by 91% (2379 → 209), total losses reduced by 92% (-$4933 → -$403). Crypto is still net negative, but the signal concentration dramatically reduced noise and losses. The same insight from equity v8.0.0 applies: signal CONCENTRATION beats signal PROLIFERATION. Future crypto improvements should focus on further reducing trade count or finding crypto-specific signal types.
+
+---
+
 ## 2026-03-24 — v8.2.0: Sustained VWAP Deviation Filter
 
 **Analysis**:

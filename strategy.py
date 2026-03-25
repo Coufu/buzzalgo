@@ -1,11 +1,12 @@
 """
 Active Trading Strategy - Claude Code modifies this file nightly.
 ==================================================================
-Version: 8.2.0
+Version: 8.3.0
 Name: Close-30 Concentration
-Description: v8.2.0: Add sustained VWAP deviation filter — require >= 2 of
-             last 3 bars below VWAP before crossover signal fires.
-             Filters noisy single-bar dips. Win rate 39%→47%, Sharpe 2.39→3.42.
+Description: v8.3.0: Apply signal concentration to crypto params — block
+             MACD/Keltner via rsi_long_min=99, add 2.0x volume filter,
+             mirror equity VWAP+HL(3) config, disable noisy signals,
+             trim low-liquidity altcoins (GRT, SUSHI, BAT, CRV).
              Core signals: VWAP reversion + HL(3) + ATR contraction.
 
 Claude Code may freely modify:
@@ -102,7 +103,7 @@ class Signal:
 class Strategy:
     """Concentrated signal strategy: VWAP reversion + HL(3), noisy signals disabled."""
 
-    VERSION = "8.2.0"
+    VERSION = "8.3.0"
 
     def __init__(self, params: dict | None = None, mode: str = "equity"):
         self.mode = mode
