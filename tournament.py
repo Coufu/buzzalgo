@@ -21,6 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
+
 from dotenv import load_dotenv
 
 load_dotenv()
