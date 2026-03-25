@@ -56,6 +56,39 @@ DEFAULT_UNIVERSE = [
 # Data fetching
 # ---------------------------------------------------------------------------
 
+def fetch_daily_data(symbols: list[str], days: int) -> dict[str, pd.DataFrame]:
+    """Fetch daily bars from Alpaca for swing strategy research."""
+    api_key = os.environ["ALPACA_API_KEY"]
+    secret_key = os.environ["ALPACA_SECRET_KEY"]
+
+    end = datetime.now(ET)
+    start = end - timedelta(days=int(days * 1.5))  # buffer for weekends
+
+    client = StockHistoricalDataClient(api_key, secret_key)
+    request = StockBarsRequest(
+        symbol_or_symbols=symbols, timeframe=TimeFrame.Day,
+        start=start, end=end, feed=DataFeed.IEX,
+    )
+
+    logger.info("Fetching %d days of daily bars for %d symbols...", days, len(symbols))
+    barset = client.get_stock_bars(request)
+
+    result = {}
+    for symbol in symbols:
+        if symbol not in barset.data:
+            continue
+        rows = [{"timestamp": b.timestamp, "open": float(b.open), "high": float(b.high),
+                 "low": float(b.low), "close": float(b.close), "volume": float(b.volume)}
+                for b in barset.data[symbol]]
+        if rows:
+            df = pd.DataFrame(rows)
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df = df.set_index("timestamp")
+            result[symbol] = df
+            logger.info("  %s: %d daily bars", symbol, len(df))
+    return result
+
+
 def fetch_research_data(symbols: list[str], days: int) -> dict[str, pd.DataFrame]:
     """Fetch 1-min bars from Alpaca and resample to 15-min."""
     api_key = os.environ["ALPACA_API_KEY"]
@@ -646,6 +679,183 @@ class DualEMATrend(ResearchStrategy):
 
 
 # ---------------------------------------------------------------------------
+# Swing Strategies (daily bars)
+# ---------------------------------------------------------------------------
+
+class SwingWeeklyBreakout(ResearchStrategy):
+    """Price closes above highest close of last 20 days with volume."""
+
+    name = "swing_weekly_breakout"
+    rsi_period = 14
+    ema_period = 10
+    volume_lookback = 20
+    atr_period = 14
+    breakout_period = 20
+    _uses_daily_bars = True
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=self.atr_period)
+        df["rsi"] = ta.rsi(df["close"], length=self.rsi_period)
+        df["ema"] = ta.ema(df["close"], length=self.ema_period)
+        df["vol_avg"] = df["volume"].rolling(window=self.volume_lookback).mean()
+        df["volume_ratio"] = df["volume"] / df["vol_avg"]
+        df["highest_close"] = df["close"].rolling(window=self.breakout_period).max().shift(1)
+        return df
+
+    def generate_signals(self, bars: dict[str, pd.DataFrame]) -> list[Signal]:
+        signals = []
+        for symbol, df in bars.items():
+            if len(df) < self.breakout_period + 5:
+                continue
+            df = self.compute_indicators(df)
+            latest = df.iloc[-1]
+            if pd.isna(latest["atr"]) or latest["atr"] <= 0:
+                continue
+
+            price = latest["close"]
+            highest = latest["highest_close"]
+            rsi = latest["rsi"] if not pd.isna(latest["rsi"]) else 50
+            ema = latest["ema"] if not pd.isna(latest["ema"]) else price
+            atr = latest["atr"]
+            volume_ratio = latest["volume_ratio"] if not pd.isna(latest["volume_ratio"]) else 1.0
+
+            if pd.isna(highest):
+                continue
+            if price > highest and 50 <= rsi <= 65 and volume_ratio >= 1.2:
+                strength = min(1.0, (price - highest) / atr * 0.5 + volume_ratio * 0.1)
+                signals.append(Signal(
+                    symbol=symbol, side="long", signal_type="swing_weekly_breakout",
+                    strength=max(0.01, strength), rsi=rsi, ema=ema, atr=atr,
+                    volume_ratio=volume_ratio, price=price,
+                    context={"highest_close": round(highest, 2)},
+                ))
+        return sorted(signals, key=lambda s: s.strength, reverse=True)[:5]
+
+
+class SwingSupportBounce(ResearchStrategy):
+    """Price near 50-day low with RSI oversold and bounce confirmation."""
+
+    name = "swing_support_bounce"
+    rsi_period = 14
+    ema_period = 10
+    volume_lookback = 20
+    atr_period = 14
+    support_lookback = 50
+    _uses_daily_bars = True
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=self.atr_period)
+        df["rsi"] = ta.rsi(df["close"], length=self.rsi_period)
+        df["ema"] = ta.ema(df["close"], length=self.ema_period)
+        df["vol_avg"] = df["volume"].rolling(window=self.volume_lookback).mean()
+        df["volume_ratio"] = df["volume"] / df["vol_avg"]
+        df["lowest_low"] = df["low"].rolling(window=self.support_lookback).min()
+        return df
+
+    def generate_signals(self, bars: dict[str, pd.DataFrame]) -> list[Signal]:
+        signals = []
+        for symbol, df in bars.items():
+            if len(df) < self.support_lookback + 5:
+                continue
+            df = self.compute_indicators(df)
+            latest = df.iloc[-1]
+            prev = df.iloc[-2]
+            if pd.isna(latest["atr"]) or latest["atr"] <= 0:
+                continue
+
+            price = latest["close"]
+            atr = latest["atr"]
+            rsi = latest["rsi"] if not pd.isna(latest["rsi"]) else 50
+            ema = latest["ema"] if not pd.isna(latest["ema"]) else price
+            volume_ratio = latest["volume_ratio"] if not pd.isna(latest["volume_ratio"]) else 1.0
+            lowest = latest["lowest_low"]
+
+            if pd.isna(lowest):
+                continue
+            near_support = (price - lowest) < 0.5 * atr
+            bounce = price > prev["close"]
+            if near_support and bounce and rsi < 35:
+                strength = min(1.0, (35 - rsi) / 20 + volume_ratio * 0.1)
+                signals.append(Signal(
+                    symbol=symbol, side="long", signal_type="swing_support_bounce",
+                    strength=max(0.01, strength), rsi=rsi, ema=ema, atr=atr,
+                    volume_ratio=volume_ratio, price=price,
+                    context={"support": round(lowest, 2), "dist_atr": round((price - lowest) / atr, 2)},
+                ))
+        return sorted(signals, key=lambda s: s.strength, reverse=True)[:5]
+
+
+class SwingEMACrossover(ResearchStrategy):
+    """Daily EMA(10) crosses above EMA(50) with ADX confirmation."""
+
+    name = "swing_ema_crossover"
+    rsi_period = 14
+    ema_period = 10  # not used directly, but needed for interface
+    volume_lookback = 20
+    atr_period = 14
+    ema_fast = 10
+    ema_slow = 50
+    adx_period = 14
+    _uses_daily_bars = True
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=self.atr_period)
+        df["rsi"] = ta.rsi(df["close"], length=self.rsi_period)
+        df["ema"] = ta.ema(df["close"], length=self.ema_fast)
+        df["ema_fast"] = ta.ema(df["close"], length=self.ema_fast)
+        df["ema_slow"] = ta.ema(df["close"], length=self.ema_slow)
+        df["vol_avg"] = df["volume"].rolling(window=self.volume_lookback).mean()
+        df["volume_ratio"] = df["volume"] / df["vol_avg"]
+        try:
+            adx_df = ta.adx(df["high"], df["low"], df["close"], length=self.adx_period)
+            adx_col = f"ADX_{self.adx_period}"
+            df["adx"] = adx_df[adx_col] if adx_df is not None and adx_col in adx_df.columns else np.nan
+        except Exception:
+            df["adx"] = np.nan
+        return df
+
+    def generate_signals(self, bars: dict[str, pd.DataFrame]) -> list[Signal]:
+        signals = []
+        for symbol, df in bars.items():
+            if len(df) < self.ema_slow + 5:
+                continue
+            df = self.compute_indicators(df)
+            latest = df.iloc[-1]
+            prev = df.iloc[-2]
+            if pd.isna(latest["atr"]) or latest["atr"] <= 0:
+                continue
+
+            price = latest["close"]
+            atr = latest["atr"]
+            rsi = latest["rsi"] if not pd.isna(latest["rsi"]) else 50
+            ema = latest["ema"] if not pd.isna(latest["ema"]) else price
+            volume_ratio = latest["volume_ratio"] if not pd.isna(latest["volume_ratio"]) else 1.0
+            adx = latest["adx"] if not pd.isna(latest.get("adx")) else 0
+
+            ema_fast = latest.get("ema_fast")
+            ema_slow = latest.get("ema_slow")
+            prev_fast = prev.get("ema_fast")
+            prev_slow = prev.get("ema_slow")
+
+            if any(pd.isna(v) for v in [ema_fast, ema_slow, prev_fast, prev_slow]):
+                continue
+
+            crossed_up = prev_fast <= prev_slow and ema_fast > ema_slow
+            if crossed_up and adx > 20 and volume_ratio >= 1.0:
+                strength = min(1.0, adx / 40 + volume_ratio * 0.1)
+                signals.append(Signal(
+                    symbol=symbol, side="long", signal_type="swing_ema_crossover",
+                    strength=max(0.01, strength), rsi=rsi, ema=ema, atr=atr,
+                    volume_ratio=volume_ratio, price=price,
+                    context={"adx": round(adx, 2), "ema_fast": round(ema_fast, 2), "ema_slow": round(ema_slow, 2)},
+                ))
+        return sorted(signals, key=lambda s: s.strength, reverse=True)[:5]
+
+
+# ---------------------------------------------------------------------------
 # Strategy registry
 # ---------------------------------------------------------------------------
 
@@ -655,6 +865,12 @@ STRATEGIES: dict[str, type[ResearchStrategy]] = {
     "rsi_div": RSIDivergence,
     "vol_spike": VolumeSpikeReversal,
     "dual_ema": DualEMATrend,
+}
+
+SWING_STRATEGIES: dict[str, type[ResearchStrategy]] = {
+    "swing_breakout": SwingWeeklyBreakout,
+    "swing_support": SwingSupportBounce,
+    "swing_ema": SwingEMACrossover,
 }
 
 
@@ -770,24 +986,67 @@ def save_results(results: list[dict], path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Strategy Research Engine")
+    all_names = list(STRATEGIES.keys()) + list(SWING_STRATEGIES.keys())
     parser.add_argument("--strategy", type=str, default=None,
-                        help=f"Run a single strategy ({', '.join(STRATEGIES.keys())})")
+                        help=f"Run a single strategy ({', '.join(all_names)})")
     parser.add_argument("--days", type=int, default=90, help="Days of historical data (default: 90)")
     parser.add_argument("--symbols", type=int, default=20, help="Number of symbols to test (default: 20)")
+    parser.add_argument("--swing", action="store_true", help="Run swing strategies (daily bars) instead of intraday")
     args = parser.parse_args()
 
-    strategy_names = [args.strategy] if args.strategy else None
+    if args.swing:
+        strategy_names = [args.strategy] if args.strategy else list(SWING_STRATEGIES.keys())
+        print(f"\n{'='*60}")
+        print(f"  Swing Strategy Research Engine")
+        print(f"  Days: {args.days} | Symbols: {args.symbols}")
+        print(f"  Strategies: {', '.join(strategy_names)}")
+        print(f"{'='*60}\n")
 
-    print(f"\n{'='*60}")
-    print(f"  Strategy Research Engine")
-    print(f"  Days: {args.days} | Symbols: {args.symbols}")
-    if strategy_names:
-        print(f"  Strategy: {args.strategy}")
+        symbols = DEFAULT_UNIVERSE[:args.symbols]
+        bars = fetch_daily_data(symbols, args.days)
+        if not bars:
+            print("No data fetched.")
+            return 1
+
+        logger.info("Data ready: %d symbols, running swing strategies...\n", len(bars))
+        results = []
+        for key in strategy_names:
+            if key not in SWING_STRATEGIES:
+                logger.warning("Unknown swing strategy: %s", key)
+                continue
+            strategy = SWING_STRATEGIES[key]()
+            logger.info("Running: %s ...", strategy.name)
+            t0 = time.time()
+            try:
+                result = simulate(strategy, bars, portfolio_value=100_000)
+                elapsed = time.time() - t0
+                logger.info("  %s completed in %.1fs: Sharpe=%.4f, WinRate=%.1f%%, Trades=%d, P&L=$%.2f",
+                            strategy.name, elapsed, result.sharpe_ratio,
+                            result.win_rate * 100, result.total_trades, result.total_pnl)
+                results.append({
+                    "strategy": strategy.name,
+                    "sharpe": round(result.sharpe_ratio, 4),
+                    "win_rate": round(result.win_rate, 4),
+                    "max_drawdown": round(result.max_drawdown, 4),
+                    "profit_factor": round(result.profit_factor, 4),
+                    "total_trades": result.total_trades,
+                    "total_pnl": round(result.total_pnl, 2),
+                })
+            except Exception as e:
+                logger.error("  %s failed: %s", strategy.name, e, exc_info=True)
     else:
-        print(f"  Strategies: {', '.join(STRATEGIES.keys())}")
-    print(f"{'='*60}\n")
+        strategy_names = [args.strategy] if args.strategy else None
 
-    results = run_research(strategy_names, args.days, args.symbols)
+        print(f"\n{'='*60}")
+        print(f"  Strategy Research Engine")
+        print(f"  Days: {args.days} | Symbols: {args.symbols}")
+        if strategy_names:
+            print(f"  Strategy: {args.strategy}")
+        else:
+            print(f"  Strategies: {', '.join(STRATEGIES.keys())}")
+        print(f"{'='*60}\n")
+
+        results = run_research(strategy_names, args.days, args.symbols)
 
     if not results:
         print("No results. Check logs above for errors.")
