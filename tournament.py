@@ -367,10 +367,104 @@ def run_tournament(
             print(f"  {pair:<30} {corr:>6.3f}  ({label})")
         print()
 
+    # Yomi Score
+    print(f"{'='*60}")
+    print(f"  YOMI SCORE: {yomi_score:.0f} / 100 — {yomi_label}")
+    print(f"{'='*60}")
+    for k, v in yomi_components.items():
+        if k != "total":
+            print(f"  {k:<25} {v:>5.1f} / 25")
+    print()
+
+    # --- Yomi Score (0-100) ---
+    # Measures how well the system reads and adapts to the market
+    logger.info("\n=== Yomi Score ===")
+    yomi_components = {}
+
+    # 1. Edge Freshness (0-25): Is 30d better than 90d? Edge growing = good
+    active_strategies = [k for k, s in strategy_scores.items() if s > 0]
+    if active_strategies:
+        freshness_scores = []
+        for key in active_strategies:
+            s30 = results[key].get(30, {}).get("sharpe", 0)
+            s90 = results[key].get(90, {}).get("sharpe", 0)
+            if s90 != 0:
+                ratio = s30 / abs(s90)
+                freshness_scores.append(min(1.0, max(0, ratio)))
+            elif s30 > 0:
+                freshness_scores.append(1.0)
+            else:
+                freshness_scores.append(0.0)
+        edge_freshness = np.mean(freshness_scores) * 25
+    else:
+        edge_freshness = 0
+    yomi_components["edge_freshness"] = round(edge_freshness, 1)
+
+    # 2. Walk-Forward Integrity (0-25): Low overfit = honest edge
+    if wf_results:
+        overfit_scores = []
+        for key in STRATEGIES:
+            wf = wf_results.get(key, {})
+            overfit = abs(wf.get("overfit_ratio", 1.0))
+            # Lower overfit = better. 0% overfit = 25 points, 100%+ = 0
+            overfit_scores.append(max(0, 1.0 - overfit))
+        wf_integrity = np.mean(overfit_scores) * 25
+    else:
+        wf_integrity = 0
+    yomi_components["walkforward_integrity"] = round(wf_integrity, 1)
+
+    # 3. Monte Carlo Confidence (0-25): High % positive = robust edge
+    if mc_results:
+        mc_scores = []
+        for key in active_strategies:
+            mc = mc_results.get(key, {})
+            pct_pos = mc.get("pct_positive", 0) / 100
+            mc_scores.append(pct_pos)
+        mc_confidence = np.mean(mc_scores) * 25 if mc_scores else 0
+    else:
+        mc_confidence = 0
+    yomi_components["monte_carlo_confidence"] = round(mc_confidence, 1)
+
+    # 4. Diversification (0-25): Low correlation between active strategies = better
+    if correlation_matrix and len(active_strategies) >= 2:
+        corr_values = []
+        for pair, c in correlation_matrix.items():
+            parts = pair.split(" vs ")
+            if len(parts) == 2 and parts[0] in active_strategies and parts[1] in active_strategies:
+                corr_values.append(abs(c))
+        if corr_values:
+            avg_corr = np.mean(corr_values)
+            diversification = (1.0 - avg_corr) * 25
+        else:
+            diversification = 25  # no active pairs to correlate = fully diversified
+    else:
+        diversification = 12.5  # single strategy = half credit
+    yomi_components["diversification"] = round(diversification, 1)
+
+    yomi_score = sum(yomi_components.values())
+    yomi_components["total"] = round(yomi_score, 1)
+
+    logger.info("  Edge Freshness:        %.1f / 25", edge_freshness)
+    logger.info("  Walk-Forward Integrity:%.1f / 25", wf_integrity)
+    logger.info("  Monte Carlo Confidence:%.1f / 25", mc_confidence)
+    logger.info("  Diversification:       %.1f / 25", diversification)
+    logger.info("  YOMI SCORE:            %.1f / 100", yomi_score)
+
+    if yomi_score >= 70:
+        yomi_label = "Strong read on the market"
+    elif yomi_score >= 50:
+        yomi_label = "Decent read, room to improve"
+    elif yomi_score >= 30:
+        yomi_label = "Weak read, strategies may be overfitting"
+    else:
+        yomi_label = "Poor read, needs fundamental rethink"
+
     # Store for Slack summary
     run_tournament._wf_results = wf_results
     run_tournament._mc_results = mc_results
     run_tournament._correlation = correlation_matrix
+    run_tournament._yomi = yomi_components
+    run_tournament._yomi_label = yomi_label
 
     # Write to strategy.json
     if not dry_run:
@@ -435,6 +529,22 @@ def _post_slack_summary(
     active_count = sum(1 for v in signal_weights.values() if v > 0)
     total_count = len(signal_weights)
     lines.append(f"\n{active_count}/{total_count} signal types active")
+
+    # Yomi Score
+    if hasattr(run_tournament, '_yomi'):
+        yomi = run_tournament._yomi
+        label = run_tournament._yomi_label
+        score = yomi.get("total", 0)
+        if score >= 70:
+            yomi_emoji = ":brain:"
+        elif score >= 50:
+            yomi_emoji = ":eyes:"
+        elif score >= 30:
+            yomi_emoji = ":thinking_face:"
+        else:
+            yomi_emoji = ":see_no_evil:"
+        lines.append(f"\n{yomi_emoji} *Yomi Score: {score:.0f}/100* — {label}")
+        lines.append(f"  Edge: {yomi.get('edge_freshness', 0):.0f} | WalkFwd: {yomi.get('walkforward_integrity', 0):.0f} | MC: {yomi.get('monte_carlo_confidence', 0):.0f} | Diversity: {yomi.get('diversification', 0):.0f}")
 
     # Walk-forward & Monte Carlo highlights
     if hasattr(run_tournament, '_wf_results'):

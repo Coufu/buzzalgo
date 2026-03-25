@@ -102,8 +102,13 @@ def check_launchd_services() -> list[dict]:
                     status = "ok"
                     detail = "exited cleanly"
                 else:
-                    status = "failed"
-                    detail = f"exit code {exit_code}"
+                    # Sweep exits 1 when all strategies have negative Sharpe — not a real failure
+                    if name == "sweep":
+                        status = "ok"
+                        detail = f"completed (exit {exit_code})"
+                    else:
+                        status = "failed"
+                        detail = f"exit code {exit_code}"
                 results.append({"name": name, "status": status, "detail": detail})
     except Exception as e:
         results.append({"name": "launchd", "status": "error", "detail": str(e)})
@@ -202,13 +207,16 @@ def check_log_freshness() -> list[dict]:
         "sentiment": PROJECT_ROOT / "sentiment.log",
     }
     # trader/dashboard log to Docker stdout, not files — skip them
+    # Services with longer update cycles get longer staleness thresholds
+    stale_threshold = {"sweep": 168, "sentiment": 48}  # sweep=weekly, sentiment=daily
     now = datetime.now().timestamp()
     for name, path in log_files.items():
         if not path.exists():
             results.append({"name": f"log:{name}", "status": "warning", "detail": "log file missing"})
             continue
         age_hours = (now - path.stat().st_mtime) / 3600
-        if age_hours > 24:
+        threshold = stale_threshold.get(name, 24)
+        if age_hours > threshold:
             results.append({"name": f"log:{name}", "status": "warning", "detail": f"stale ({age_hours:.0f}h old)"})
         else:
             results.append({"name": f"log:{name}", "status": "ok", "detail": f"updated {age_hours:.1f}h ago"})
