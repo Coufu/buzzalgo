@@ -1027,10 +1027,10 @@ def main():
                     "strategy": strategy.name,
                     "sharpe": round(result.sharpe_ratio, 4),
                     "win_rate": round(result.win_rate, 4),
-                    "max_drawdown": round(result.max_drawdown, 4),
+                    "max_dd": round(result.max_drawdown * 100, 2),
                     "profit_factor": round(result.profit_factor, 4),
-                    "total_trades": result.total_trades,
-                    "total_pnl": round(result.total_pnl, 2),
+                    "trades": result.total_trades,
+                    "pnl": round(result.total_pnl, 2),
                 })
             except Exception as e:
                 logger.error("  %s failed: %s", strategy.name, e, exc_info=True)
